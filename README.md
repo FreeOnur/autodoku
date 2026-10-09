@@ -7,7 +7,7 @@ AutoDoku hört im Unterricht mit, macht daraus **live eine saubere Mitschrift** 
 | | |
 |---|---|
 | 🎙️ **Live-Transkript** | Fach antippen → Mikrofon hört zu, Text erscheint live |
-| ⚡ **Live-Zusammenfassung** | etwa alle 75 s macht Claude daraus Stichpunkte, Merke-, Definitions- und Formel-Boxen |
+| ⚡ **Live-Zusammenfassung** | alle 1–2 Minuten macht Claude daraus Stichpunkte, Merke-, Definitions- und Formel-Boxen |
 | 🧮 **Mathe richtig** | „x hoch zwei durch zwei a“ → $\frac{x^2}{2a}$, in Word als echte Formel (Brüche, Wurzeln, Summen, Integrale, Matrizen, Fallunterscheidungen …) |
 | 📷 **Tafelfotos** | Tafel, Folie oder Heft fotografieren → Claude überträgt den Inhalt inkl. Formeln, das Foto kommt mit Bildunterschrift ins Dokument |
 | 🖼️ **Bilder suchen** | beim Fertigstellen sucht AutoDoku passende, frei lizenzierte Abbildungen (Wikimedia Commons, mit Quellenangabe) – 🔄 zum Austauschen |
@@ -30,19 +30,15 @@ Jedes Fach hat eigene Einstellungen: Englisch wird z. B. auf Englisch erkannt un
    Ohne Schlüssel funktioniert nur das Transkript.
 4. Ohne Schlüssel ausprobieren: ⚙️ → **Demo-Stunde anlegen** → **⬇ Word**.
 
-## Am Handy (GitHub Pages, ca. 5 Minuten)
+## Am Handy
 
-Das Mikrofon funktioniert im Browser nur über **HTTPS** – darum kommt AutoDoku einmal auf GitHub Pages (gratis):
-
-1. Auf github.com einloggen → oben rechts **+ → New repository**.
-2. Name: `autodoku`, **Public** auswählen (Pages ist gratis nur für öffentliche Repos) → **Create repository**.
-3. Auf der neuen Seite **„uploading an existing file“** anklicken → den **Inhalt** des Ordners `AutoDoku` (nicht den Ordner selbst) ins Fenster ziehen → **Commit changes**.
-4. **Settings → Pages** → bei *Branch* `main` und `/ (root)` wählen → **Save**.
-5. Nach 1–2 Minuten läuft die App unter `https://DEINNAME.github.io/autodoku/`.
+AutoDoku läuft online unter **https://freeonur.github.io/autodoku/** (GitHub Pages, Repo `FreeOnur/autodoku`).
 
 Am Handy in **Chrome** öffnen → Menü ⋮ → **„Zum Startbildschirm hinzufügen“** → AutoDoku läuft wie eine App.
-Öffentlich ist nur der Programmcode – deine Mitschriften und dein API-Schlüssel bleiben nur auf deinem Gerät.
+Öffentlich ist nur der Programmcode – deine Mitschriften und dein API-Schlüssel bleiben nur auf deinem Gerät (auch der Schlüssel muss am Handy einmal extra eingetragen werden).
 Wichtig: Bildschirm anlassen (macht AutoDoku automatisch) – wenn das Handy sperrt, pausiert die Erkennung.
+
+**Updates veröffentlichen:** geänderte Dateien auf github.com/FreeOnur/autodoku hochladen (*Add file → Upload files*, für Unterordner die URL `…/upload/main/js` usw.) – nach 1–2 Minuten ist die neue Version online.
 
 ## Tipps für gute Mitschriften
 
