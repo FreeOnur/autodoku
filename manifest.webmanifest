@@ -1,0 +1,16 @@
+{
+  "name": "AutoDoku – Live-Mitschrift",
+  "short_name": "AutoDoku",
+  "description": "Hört im Unterricht mit, fasst live zusammen und exportiert nach Word – mit echten Formeln.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0A110F",
+  "theme_color": "#0A110F",
+  "lang": "de",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
