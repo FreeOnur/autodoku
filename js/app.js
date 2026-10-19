@@ -333,7 +333,17 @@
   }
 
   // ============ Stunde ============
+  // Beim Klick (Nutzer-Aktion) schon mal Offline-Sprachpaket & Chrome-KI vorbereiten
+  function warmUp(subjectId) {
+    try {
+      const lang = Subjects.get(subjectId).speechLang || 'de-AT';
+      if (LiveTranscriber.hasLocal()) LiveTranscriber.localStatus(lang).then(st => { if (st.status === 'downloadable') LiveTranscriber.installLocal(lang).catch(() => {}); });
+      if (AI.provider() === 'chrome' && AI.chrome.state === 'downloadable') AI.prepareChrome().catch(() => {});
+    } catch (e) { /* egal */ }
+  }
+
   async function startLesson(subjectId) {
+    warmUp(subjectId);
     if (st.live && st.live.recording) {
       const ok = await confirmBox('Aufnahme läuft noch', 'Die aktuelle Aufnahme wird pausiert und eine neue Stunde gestartet.', 'Neue Stunde');
       if (!ok) return;
@@ -426,7 +436,7 @@
     renderAll(s);
     if (st.pendingAutostart === s.id) {
       st.pendingAutostart = null;
-      if (!Settings.get().apiKey) toast('Tipp: Ohne API-Schlüssel gibt es nur das Transkript. ⚙️ Einstellungen → Claude', 'warn', 6000);
+      if (!AI.ready() && AI.why()) toast(esc(AI.why()), 'warn', 7000);
       startRecording();
     }
   }
@@ -453,7 +463,7 @@
       $$('[data-photo]').forEach(b => b.onclick = () => pickPhoto(s));
       const rb = $('#rec-btn');
       if (rb) {
-        rb.onclick = () => (st.live && st.live.recording ? stopRecording() : startRecording());
+        rb.onclick = () => { if (st.live && st.live.recording) stopRecording(); else { warmUp(s.subjectId); startRecording(); } };
         $('#dock-note').onclick = () => addNote(s);
         $('#dock-sos').onclick = () => recap(s);
         $('#dock-final').onclick = () => finalize(s);
@@ -506,7 +516,7 @@
         <div class="pe-icon">${rec ? '<span class="eq">' + '<i></i>'.repeat(5) + '</span>' : esc(sub.emoji)}</div>
         <h3>${rec ? 'Ich hör zu …' : 'Noch leer'}</h3>
         <p>${rec ? (Settings.get().liveUpdates ? `Sobald genug gesagt wurde (≈${Settings.get().minWords} Wörter), erscheint hier die erste Zusammenfassung. Mit <b>⚡ Update</b> geht's sofort.` : 'Sparstufe <b>„Nur am Ende“</b>: Während der Stunde läuft nur das Transkript (Tab <b>Live</b>). Am Ende <b>✨ Fertig</b> drücken – dann schreibt Claude die ganze Mitschrift auf einmal.') : 'Starte die Aufnahme unten mit dem roten Knopf – oder füg ein Tafelfoto hinzu.'}</p>
-        ${!Settings.get().apiKey ? '<p class="warn-text">Kein Claude-API-Schlüssel gesetzt → es gibt nur das Transkript. <button class="btn tiny" data-open-settings>Einstellungen</button></p>' : ''}
+        ${!AI.ready() ? `<p class="warn-text">${esc(AI.why() || 'Keine KI eingerichtet')} → bis dahin läuft nur das Transkript. <button class="btn tiny" data-open-settings>Einstellungen</button></p>` : ''}
       </div>`;
       const b = $('[data-open-settings]', paper); if (b) b.onclick = openSettings;
       return;
@@ -623,7 +633,7 @@
     if (s.status === 'new') s.status = 'paused';
     save(s);
     toast(`${words(t)} Wörter eingefügt.`);
-    if (Settings.get().apiKey && Settings.get().liveUpdates) liveUpdate(s, true);
+    if (AI.ready() && Settings.get().liveUpdates) liveUpdate(s, true);
   }
 
   // ---------- Aufgaben ----------
@@ -667,17 +677,17 @@
       let im;
       try { im = await Images.toJpeg(f, 1600, 0.85); } catch (e) { toast('Foto konnte nicht gelesen werden', 'err'); continue; }
       const id = uid('img');
-      s.images[id] = { dataUrl: im.dataUrl, w: im.w, h: im.h, caption: 'Tafelbild', credit: '', kind: 'board', pending: !!set.apiKey, t: curRecMs(s) };
+      s.images[id] = { dataUrl: im.dataUrl, w: im.w, h: im.h, caption: 'Tafelbild', credit: '', kind: 'board', pending: AI.ready() && AI.supportsImages(), t: curRecMs(s) };
       if (s.status === 'new') s.status = 'paused';
       save(s); renderPhotos(s);
-      if (!set.apiKey) {
+      if (!AI.ready() || !AI.supportsImages()) {
         insertSection(s, `## Tafelbild\n\n![Tafelbild](img:${id})`, false);
         continue;
       }
       toast('📷 Claude liest das Foto …');
       try {
-        const r = await Claude.withRetry(() => Claude.call({
-          apiKey: set.apiKey, model: set.modelFinal, maxTokens: 3000, tag: s.id,
+        const r = await Claude.withRetry(() => AI.call({
+          apiKey: set.apiKey, model: set.modelFinal, tier: 'final', maxTokens: 3000, tag: s.id,
           system: Prompts.board(sub, set),
           messages: [{ role: 'user', content: [Claude.imageBlock(im.dataUrl), { type: 'text', text: `Bisherige Gliederung:\n${(s.finalNotes != null ? splitSections(s.finalNotes) : s.sections).map(firstLine).join('\n') || '(leer)'}\n\nLetzter Abschnitt:\n${(s.sections || []).slice(-1)[0] || ''}` }] }],
         }));
@@ -801,7 +811,8 @@
       },
       onInterim: (text) => { L.interim = text; const el = $('#interim'); if (el && st.session === s) { el.textContent = text; if (text) scrollTranscript(true); } },
       onState: () => renderLiveInfo(),
-      onError: (msg, fatal) => { toast(esc(msg), fatal ? 'err' : 'warn', fatal ? 8000 : 4000); if (fatal) stopRecording(); },
+      onError: (msg, fatal) => { toast(esc(msg), fatal ? 'err' : 'warn', fatal ? 9000 : 6000); if (fatal) stopRecording(); },
+      onNeedLocal: (info) => offerLocalSpeech(L, info),
     });
     L.transcriber.start(sub.speechLang || 'de-AT');
     s.status = 'live';
@@ -810,6 +821,41 @@
     if (Settings.get().keepAwake) requestWakeLock();
     renderRecBtn(); renderLiveInfo(); renderNotes(s);
     setTopMid(recPill(s));
+  }
+
+  // Schul-WLAN blockiert Googles Spracherkennung -> Offline-Sprachpaket im Chrome laden
+  function offerLocalSpeech(L, info) {
+    const m = modal({
+      title: '🔒 Offline-Spracherkennung',
+      body: `<p>Die Google-Spracherkennung ist von hier nicht erreichbar – das Schul-WLAN blockiert sie oft, auch wenn das Internet sonst geht.</p>
+        <p><b>Lösung:</b> Chrome kann ${esc(info.lang)} auch <b>direkt auf deinem Laptop</b> erkennen. Dafür einmal das Sprachpaket laden (ein paar MB), danach läuft's offline – und das Audio verlässt nie deinen Laptop.</p>
+        <p class="muted small" id="ls-status"></p>`,
+      actions: [
+        { label: 'Abbrechen', onClick: () => { stopRecording(true); } },
+        {
+          label: '⬇ Sprachpaket laden', primary: true, onClick: (el) => {
+            const stEl = $('#ls-status', el);
+            stEl.textContent = 'Lade Sprachpaket … (kann 10–60 Sekunden dauern)';
+            $$('.modal-actions .btn', el).forEach(b => { b.disabled = true; });
+            LiveTranscriber.installLocal(info.lang).then(async (lang) => {
+              let st2 = await LiveTranscriber.localStatus(info.lang);
+              for (let i = 0; i < 40 && st2.status === 'downloading'; i++) { await new Promise(r => setTimeout(r, 1500)); st2 = await LiveTranscriber.localStatus(info.lang); }
+              if ((lang || st2.status === 'available') && L.transcriber && L.recording) {
+                const t = L.transcriber;
+                t.want = true; t.local = true; t.localLang = lang || st2.lang; t.netErrors = 0;
+                t._spawn();
+                toast('🔒 Offline-Spracherkennung läuft!', 'ok');
+                m.close();
+              } else {
+                stEl.textContent = 'Hat nicht geklappt. Alternative: Handy-Hotspot einschalten und neu starten.';
+                $$('.modal-actions .btn', el).forEach(b => { b.disabled = false; });
+              }
+            });
+            return false;
+          },
+        },
+      ],
+    });
   }
 
   function stopRecording(noFlush) {
@@ -827,7 +873,7 @@
     renderRecBtn(); renderLiveInfo();
     setTopMid('');
     // Rest noch einarbeiten
-    if (!noFlush && s && s.cursor < s.segments.length && Settings.get().apiKey && Settings.get().liveUpdates) liveUpdate(s, true);
+    if (!noFlush && s && s.cursor < s.segments.length && AI.ready() && Settings.get().liveUpdates) liveUpdate(s, true);
   }
 
   function tick(s) {
@@ -835,7 +881,7 @@
     renderLiveInfo();
     const pill = $('#rec-pill-time'); if (pill) pill.textContent = mmss(curRecMs(s));
     const set = Settings.get();
-    if (!set.apiKey || !set.liveUpdates || L.busy || st.editing) return;
+    if (!AI.ready() || !set.liveUpdates || L.busy || st.editing) return;
     const since = (Date.now() - L.lastUpdateAt) / 1000;
     const backoff = Math.min(300, set.interval * Math.pow(2, L.errors));
     if (since < (L.errors ? backoff : set.interval)) return;
@@ -867,7 +913,8 @@
       const rest = Math.max(0, Math.round(set.interval - (Date.now() - L.lastUpdateAt) / 1000));
       const state = L.transcriber && L.transcriber.state === 'restarting' ? 'hört gleich wieder zu' : 'hört zu';
       el.innerHTML = `<span class="li-chip rec"><span class="dot rec"></span>${mmss(curRecMs(s))} · ${state}</span>` +
-        (!set.apiKey ? '<span class="li-chip warn">kein API-Schlüssel</span>'
+        (L.transcriber && L.transcriber.local ? '<span class="li-chip ok" title="Spracherkennung läuft offline im Chrome">🔒 offline</span>' : '') +
+        (!AI.ready() ? `<span class="li-chip warn" title="${esc(AI.why())}">nur Transkript</span>`
           : L.busy ? '<span class="li-chip busy"><span class="spin"></span> schreibt mit …</span>'
             : !set.liveUpdates ? '<span class="li-chip" title="Sparstufe „Nur am Ende“">🪙 Zusammenfassung bei „Fertig“</span>'
               : `<span class="li-chip">${pending < set.minWords ? `${pending}/${set.minWords} Wörter` : `Update in ${rest}s`}</span>`) + costChip(s);
@@ -880,6 +927,7 @@
 
   function costChip(s) {
     if (!s.usage || !s.usage.input) return '';
+    if (!s.usage.cost) return `<span class="li-chip ok" title="${fmtTok(s.usage.input + s.usage.output)} Tokens – kostenlos">🆓 gratis</span>`;
     return `<span class="li-chip cost" title="${fmtTok(s.usage.input + s.usage.output)} Tokens für diese Stunde (${fmtTok(s.usage.input)} rein, ${fmtTok(s.usage.output)} raus)">💰 ${fmtCost(s.usage.cost)}</span>`;
   }
 
@@ -902,7 +950,7 @@
     const L = st.live || (st.live = { recording: false, busy: false, errors: 0, lastUpdateAt: Date.now() });
     if (L.busy || st.finalizing) return;
     if (st.editing) { if (force) toast('Erst Bearbeiten speichern'); return; }
-    if (!set.apiKey) { if (force) { toast('Für Zusammenfassungen brauchst du einen Claude-API-Schlüssel.', 'warn'); openSettings(); } return; }
+    if (!AI.ready()) { if (force) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); } return; }
     const pending = s.segments.slice(s.cursor);
     if (!pending.length) { if (force) toast('Seit dem letzten Update wurde nichts Neues gesagt.'); return; }
     const upto = s.segments.length;
@@ -911,8 +959,8 @@
     const context = s.segments.slice(Math.max(0, s.cursor - 30), s.cursor).map(x => x.text).join(' ').slice(-700);
     L.busy = true; renderLiveInfo();
     try {
-      const r = await Claude.withRetry(() => Claude.call({
-        apiKey: set.apiKey, model: set.modelLive, maxTokens: 3500, temperature: 0.2, tag: s.id,
+      const r = await Claude.withRetry(() => AI.call({
+        apiKey: set.apiKey, model: set.modelLive, tier: 'live', maxTokens: 3500, temperature: 0.2, tag: s.id,
         system: Prompts.live(sub, set),
         messages: [{
           role: 'user', content: Prompts.liveUser({
@@ -965,7 +1013,7 @@
   async function finalize(s) {
     const set = Settings.get();
     if (st.finalizing) return;
-    if (!set.apiKey) { toast('Dafür brauchst du einen Claude-API-Schlüssel.', 'warn'); openSettings(); return; }
+    if (!AI.ready()) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); return; }
     if (!s.segments.length && !Object.keys(s.images).length) { toast('Noch nichts aufgenommen.'); return; }
     if (st.editing) toggleEdit(s);
     if (st.live && st.live.recording && st.session === s) stopRecording(true);
@@ -981,8 +1029,8 @@
     const images = Object.entries(s.images).filter(([, im]) => im.kind === 'board').map(([id, im]) => `img:${id} = ${im.caption}`).join('; ');
     paper.classList.add('streaming');
     try {
-      const r = await Claude.withRetry(() => Claude.stream({
-        apiKey: set.apiKey, model: set.modelFinal, maxTokens: 16000, temperature: 0.3, tag: s.id,
+      const r = await Claude.withRetry(() => AI.stream({
+        apiKey: set.apiKey, model: set.modelFinal, tier: 'final', maxTokens: 16000, temperature: 0.3, tag: s.id,
         system: Prompts.final(sub, set),
         messages: [{
           role: 'user', content: Prompts.finalUser({
@@ -1040,7 +1088,7 @@
 
   async function streamToChat(s, system, userContent, model, label) {
     const set = Settings.get();
-    if (!set.apiKey) { toast('Dafür brauchst du einen Claude-API-Schlüssel.', 'warn'); openSettings(); return; }
+    if (!AI.ready()) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); return; }
     s.chat = s.chat || [];
     const msg = { role: 'assistant', text: label ? label + '\n\n…' : '…' };
     s.chat.push(msg);
@@ -1050,7 +1098,7 @@
     try {
       const history = s.chat.slice(0, -2).slice(-6).map(m => ({ role: m.role, content: m.text }));
       while (history.length && history[0].role !== 'user') history.shift();
-      const r = await Claude.stream({
+      const r = await AI.stream({
         apiKey: set.apiKey, model, maxTokens: 1500, tag: s.id,
         system, messages: [...history, { role: 'user', content: userContent }],
         onText: (t) => { msg.text = (label ? label + '\n\n' : '') + t; if (node && node.isConnected) { node.innerHTML = MD.toHtml(MD.parse(msg.text)); el.scrollTop = el.scrollHeight; } },
@@ -1091,7 +1139,7 @@
   // ============ Lernzettel & Quiz ============
   async function makeStudySheet(sub, list) {
     const set = Settings.get();
-    if (!set.apiKey) { toast('Dafür brauchst du einen Claude-API-Schlüssel.', 'warn'); openSettings(); return; }
+    if (!AI.ready()) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); return; }
     const sheet = newSession(sub.id, 'study');
     sheet.title = `Lernzettel ${sub.name}`;
     sheet.status = 'final';
@@ -1108,8 +1156,8 @@
     paper.innerHTML = '<div class="paper-empty"><div class="spinner"></div><h3>Lernzettel wird erstellt …</h3></div>';
     let last = 0;
     try {
-      const r = await Claude.withRetry(() => Claude.stream({
-        apiKey: set.apiKey, model: set.modelFinal, maxTokens: 16000, tag: sheet.id,
+      const r = await Claude.withRetry(() => AI.stream({
+        apiKey: set.apiKey, model: set.modelFinal, tier: 'final', maxTokens: 16000, tag: sheet.id,
         system: Prompts.studySheet(sub, set),
         messages: [{ role: 'user', content: `MITSCHRIFTEN:\n\n${src.slice(0, 200000)}` }],
         onText: (t) => {
@@ -1132,11 +1180,11 @@
 
   async function runQuiz(sub, list) {
     const set = Settings.get();
-    if (!set.apiKey) { toast('Dafür brauchst du einen Claude-API-Schlüssel.', 'warn'); openSettings(); return; }
+    if (!AI.ready()) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); return; }
     const m = modal({ title: `🧠 Quiz · ${esc(sub.name)}`, body: '<div class="quiz"><div class="spinner"></div><p class="muted center">Claude baut deine Karteikarten …</p></div>', wide: true });
     try {
       const src = list.map(s => `### ${s.title}\n${notesMd(s)}`).join('\n\n').slice(0, 120000);
-      const r = await Claude.call({ apiKey: set.apiKey, model: set.modelLive, maxTokens: 4000, system: Prompts.quiz(sub, set), messages: [{ role: 'user', content: `Erstelle 10 Karteikarten.\n\nMITSCHRIFTEN:\n${src}` }] });
+      const r = await AI.call({ apiKey: set.apiKey, model: set.modelLive, tier: 'live', maxTokens: 4000, system: Prompts.quiz(sub, set), messages: [{ role: 'user', content: `Erstelle 10 Karteikarten.\n\nMITSCHRIFTEN:\n${src}` }] });
       const cards = [...r.text.matchAll(/<card>([\s\S]*?)<\/card>/g)].map(x => ({ q: Claude.tag(x[1], 'q'), a: Claude.tag(x[1], 'a') })).filter(c => c.q);
       if (!cards.length) throw new Error('Keine Karten erhalten');
       let i = 0, known = 0;
@@ -1250,13 +1298,25 @@
       title: '⚙️ Einstellungen', wide: true,
       body: `
       <div class="settings">
-        <fieldset><legend>Claude (KI)</legend>
-          <label class="field"><span>API-Schlüssel</span>
+        <fieldset><legend>KI für die Zusammenfassungen</legend>
+          <div class="modes prov">${[
+            ['auto', '⚡ Automatisch gratis', 'Chrome-KI, wenn dein Laptop sie kann – sonst Gemini (gratis Schlüssel)'],
+            ['chrome', '🖥️ Chrome-KI (lokal)', 'Läuft direkt auf deinem Laptop: gratis, ohne Schlüssel, ohne Internet. Braucht aktuelles Chrome & einen stärkeren PC.'],
+            ['gemini', '🔷 Google Gemini', 'Gratis-Kontingent mit kostenlosem Schlüssel (Google-Konto, 1 Minute). Kann Tafelfotos lesen.'],
+            ['claude', '🟠 Claude', 'Eigener Claude-API-Schlüssel – kostet ein paar Cent pro Stunde.'],
+          ].map(([k, l, h]) => `<label class="mode ${(s.provider || 'auto') === k ? 'on' : ''}"><input type="radio" name="prov" value="${k}" ${(s.provider || 'auto') === k ? 'checked' : ''}><b>${l}</b><small>${h}</small></label>`).join('')}</div>
+          <p class="spend" id="prov-status"></p>
+          <div class="prov-box" data-for="chrome auto"><button class="btn small" id="chrome-load" type="button">🖥️ Chrome-KI laden / prüfen</button></div>
+          <label class="field prov-box" data-for="gemini auto"><span>Gemini-Schlüssel (gratis)</span>
+            <div class="row"><input class="input" type="password" id="set-gkey" value="${esc(s.geminiKey || '')}" placeholder="AIza…" autocomplete="off"><button class="btn small" id="set-gtest" type="button">Testen</button></div>
+            <small>Gratis auf <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> → „API-Schlüssel erstellen“ (Google-Konto, keine Kreditkarte). Hinweis: Im Gratis-Kontingent darf Google die Texte zur Verbesserung nutzen.</small>
+          </label>
+          <label class="field prov-box" data-for="claude"><span>Claude-API-Schlüssel</span>
             <div class="row"><input class="input" type="password" id="set-key" value="${esc(s.apiKey)}" placeholder="sk-ant-…" autocomplete="off"><button class="btn small" id="set-test" type="button">Testen</button></div>
             <small>Bekommst du auf <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> (braucht etwas Guthaben). Der Schlüssel bleibt nur auf diesem Gerät.</small>
           </label>
         </fieldset>
-        <fieldset><legend>Sparstufe</legend>
+        <fieldset class="prov-box" data-for="claude"><legend>Sparstufe (Claude)</legend>
           <div class="modes">${Object.entries(Store.MODES).map(([k, m]) => `<label class="mode ${s.mode === k ? 'on' : ''}"><input type="radio" name="mode" value="${k}" ${s.mode === k ? 'checked' : ''}><b>${m.label}</b><small>${m.hint}</small></label>`).join('')}</div>
           <details class="adv" ${s.mode === 'custom' ? 'open' : ''}><summary>Genauer einstellen</summary>
             <label class="check"><input type="checkbox" id="set-liveupd" ${s.liveUpdates ? 'checked' : ''}> Während der Stunde live zusammenfassen</label>
@@ -1297,6 +1357,8 @@
         label: 'Speichern', primary: true, onClick: (el) => {
           Settings.set({
             apiKey: $('#set-key', el).value.trim(),
+            provider: (el.querySelector('input[name=prov]:checked') || {}).value || 'auto',
+            geminiKey: $('#set-gkey', el).value.trim(),
             mode: (el.querySelector('input[name=mode]:checked') || {}).value || 'custom',
             liveUpdates: $('#set-liveupd', el).checked,
             modelLive: $('#set-mlive', el).value.trim() || 'claude-haiku-5-5',
@@ -1311,6 +1373,37 @@
       }],
     });
     const el = m.el;
+    // KI-Anbieter
+    const provNow = () => (el.querySelector('input[name=prov]:checked') || {}).value || 'auto';
+    const renderProv = () => {
+      const p = provNow();
+      $$('.prov .mode', el).forEach(x => x.classList.toggle('on', x.querySelector('input').value === p));
+      $$('.prov-box', el).forEach(b => { b.style.display = b.dataset.for.split(' ').includes(p) ? '' : 'none'; });
+      const cs = AI.chrome.state;
+      const ctext = { available: '✅ Chrome-KI ist bereit (lokal, gratis).', downloadable: '⬇ Chrome-KI kann geladen werden – Button drücken (einmalig, braucht WLAN).', downloading: `⏳ Chrome-KI lädt … ${Math.round((AI.chrome.progress || 0) * 100)} %`, unavailable: '❌ Dein Laptop/Chrome kann die lokale KI nicht – nimm Gemini (gratis).', unsupported: '❌ Dieser Browser hat keine eingebaute KI (aktuelles Google Chrome am PC nötig) – nimm Gemini (gratis).', checking: '… prüfe Chrome-KI' }[cs] || cs;
+      $('#prov-status', el).textContent = (p === 'chrome' || p === 'auto') ? ctext : '';
+    };
+    $$('input[name=prov]', el).forEach(r => r.onchange = renderProv);
+    AI.onChange = () => { if (el.isConnected) renderProv(); };
+    AI.checkChrome().then(renderProv);
+    renderProv();
+    $('#chrome-load', el).onclick = async () => {
+      const b = $('#chrome-load', el); b.disabled = true;
+      try { await AI.checkChrome(); if (AI.chrome.state !== 'unavailable' && AI.chrome.state !== 'unsupported') await AI.prepareChrome(); toast(AI.chrome.state === 'available' ? '✅ Chrome-KI bereit' : 'Chrome-KI nicht verfügbar', AI.chrome.state === 'available' ? 'ok' : 'warn'); }
+      catch (e) { toast(esc(e.message), 'err', 7000); }
+      b.disabled = false; renderProv();
+    };
+    $('#set-gtest', el).onclick = async () => {
+      const b = $('#set-gtest', el); b.disabled = true; b.textContent = '…';
+      const key = $('#set-gkey', el).value.trim();
+      try {
+        const pick = await AI.pickGeminiModels(key);
+        Settings.set({ geminiKey: key, geminiLive: pick.live, geminiFinal: pick.final });
+        b.textContent = '✓ läuft'; b.classList.add('ok');
+        toast(`✓ Gemini bereit (${esc(pick.final)})`, 'ok');
+      } catch (e) { b.textContent = 'Fehler'; toast(esc(e.message), 'err', 7000); }
+      b.disabled = false;
+    };
     // Sparstufe wählen -> Felder vorbelegen
     const applyMode = (k) => {
       const md = Store.MODES[k]; if (!md) return;
@@ -1405,19 +1498,20 @@
       body: `<div class="ob">
         <ol class="ob-steps">
           <li><b>Fach antippen</b><span>AutoDoku hört über das Mikrofon mit und schreibt live ein Transkript.</span></li>
-          <li><b>Claude fasst zusammen</b><span>Alle 1–2 Minuten wird daraus eine saubere Mitschrift: Stichpunkte, Merke-Boxen, Formeln, Hausübungen.</span></li>
+          <li><b>KI fasst zusammen</b><span>Alle 1–2 Minuten wird daraus eine saubere Mitschrift: Stichpunkte, Merke-Boxen, Formeln, Hausübungen.</span></li>
           <li><b>Tafel fotografieren</b><span>📷 – Formeln und Skizzen landen automatisch im Dokument.</span></li>
           <li><b>✨ Fertig → ⬇ Word</b><span>Polierte Mitschrift mit echten Word-Formeln, Bildern und Quiz-Fragen.</span></li>
         </ol>
-        <label class="field"><span>Claude-API-Schlüssel (für die Zusammenfassungen)</span>
-          <input class="input" type="password" id="ob-key" placeholder="sk-ant-…" autocomplete="off">
-          <small>Erstellen auf <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a>. Ohne Schlüssel gibt's nur das Live-Transkript.</small>
+        <p class="fineprint">🆓 Standardmäßig <b>gratis</b>: AutoDoku nutzt die eingebaute KI von Chrome (läuft lokal auf deinem Laptop) oder Google Gemini mit kostenlosem Schlüssel. Einstellen unter ⚙️.</p>
+        <label class="field"><span>Optional: Gemini-Schlüssel (gratis, falls dein Laptop keine Chrome-KI hat)</span>
+          <input class="input" type="password" id="ob-key" placeholder="AIza…" autocomplete="off">
+          <small>Kostenlos auf <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.</small>
         </label>
         <p class="fineprint">💬 Kurz fair bleiben: Frag deine Lehrkraft, ob Mitschreiben per App ok ist. AutoDoku speichert kein Audio, nur Text – und alles bleibt auf deinem Gerät.</p>
       </div>`,
       actions: [
-        { label: '🎓 Erst Demo ansehen', onClick: (el) => { const k = $('#ob-key', el).value.trim(); if (k) Settings.set({ apiKey: k }); createDemo(); } },
-        { label: 'Los geht\'s', primary: true, onClick: (el) => { const k = $('#ob-key', el).value.trim(); if (k) Settings.set({ apiKey: k }); } },
+        { label: '🎓 Erst Demo ansehen', onClick: (el) => { const k = $('#ob-key', el).value.trim(); if (k) Settings.set({ geminiKey: k }); createDemo(); } },
+        { label: 'Los geht\'s', primary: true, onClick: (el) => { const k = $('#ob-key', el).value.trim(); if (k) Settings.set({ geminiKey: k }); } },
       ],
       onClose: () => localStorage.setItem('autodoku.onboarded', '1'),
     });

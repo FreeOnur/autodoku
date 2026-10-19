@@ -64,6 +64,10 @@
   // ---------- Einstellungen ----------
   const DEFAULT_SETTINGS = {
     apiKey: '',
+    provider: 'auto',      // auto | chrome | gemini | claude
+    geminiKey: '',
+    geminiLive: '',
+    geminiFinal: '',
     mode: 'spar',          // spar | normal | ende
     liveUpdates: true,     // false = nur Transkript, Zusammenfassung erst bei "Fertig"
     modelLive: 'claude-haiku-5-5',
