@@ -429,6 +429,8 @@ input[type=range] { accent-color: var(--chalk); width: 100%; }
 .mode small { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .mode.on { border-color: var(--chalk); box-shadow: 0 0 0 3px rgba(124, 243, 195, .14); }
 .adv { margin-top: 10px; }
+.modes.prov { grid-template-columns: repeat(2, 1fr); margin-bottom: 6px; }
+.prov-box { margin-top: 8px; }
 .adv summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .spend { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
 .spend b { color: var(--text); }
