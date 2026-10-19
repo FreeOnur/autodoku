@@ -1,7 +1,7 @@
 /* AutoDoku – Offline-Cache für die App-Hülle (API-Aufrufe gehen immer ins Netz) */
-const CACHE = 'autodoku-v2';
+const CACHE = 'autodoku-v3';
 const SHELL = ['./', 'index.html', 'css/app.css', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',
-  'js/latex2omml.js', 'js/markdown.js', 'js/docx.js', 'js/store.js', 'js/claude.js', 'js/prompts.js', 'js/speech.js', 'js/images.js', 'js/app.js',
+  'js/latex2omml.js', 'js/markdown.js', 'js/docx.js', 'js/store.js', 'js/claude.js', 'js/ai.js', 'js/prompts.js', 'js/speech.js', 'js/images.js', 'js/app.js',
   'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css', 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js',
   'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'];
 

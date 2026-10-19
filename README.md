@@ -48,7 +48,20 @@ Wichtig: Bildschirm anlassen (macht AutoDoku automatisch) – wenn das Handy spe
 - Am Ende **✨ Fertig** drücken, dann **⬇ Word**.
 - In ⚙️ Einstellungen: Name & Klasse für den Kopf des Word-Dokuments, Update-Intervall, Transkript-Anhang.
 
-## Kosten & Sparstufen
+## Gratis-KI (ohne Claude-Tokens)
+
+Unter ⚙️ → **KI für die Zusammenfassungen**:
+
+| Anbieter | Kosten | Was du brauchst |
+|---|---|---|
+| ⚡ **Automatisch gratis** (Standard) | gratis | nimmt die Chrome-KI, sonst Gemini |
+| 🖥️ **Chrome-KI** | gratis, lokal, offline | aktuelles Google Chrome am PC, stärkerer Laptop (GPU >4 GB oder 16 GB RAM), einmal „Chrome-KI laden“ |
+| 🔷 **Google Gemini** | gratis (Kontingent) | kostenloser Schlüssel von [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| 🟠 **Claude** | ein paar Cent/Stunde | eigener API-Schlüssel |
+
+**Spracherkennung im Schul-WLAN:** Meldet AutoDoku „Spracherkennung braucht Internet“, blockiert meist das WLAN die Google-Spracherkennung. AutoDoku bietet dann an, das **Offline-Sprachpaket** im Chrome zu laden – danach läuft die Erkennung direkt am Laptop (🔒 offline). Notlösung: Handy-Hotspot.
+
+## Kosten & Sparstufen (nur bei Claude)
 
 Die Zusammenfassungen laufen über die Claude API (Abrechnung nach Tokens; 1 Token ≈ ¾ Wort). In ⚙️ → **Sparstufe**:
 
