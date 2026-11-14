@@ -21,15 +21,40 @@
   > Erklärung
   Typen: DEFINITION, SATZ, FORMEL, MERKE, BEISPIEL, ACHTUNG (typische Fehler), TIPP, PRUEFUNG (nur wenn angekündigt ist, dass es zur Prüfung/Schularbeit/Test kommt), AUFGABE.
 - Tabellen: | Spalte | Spalte | mit Trennzeile |---|---|.
-- Code: \`\`\`sprache … \`\`\`.
+- Code: IMMER als Block \`\`\`sprache … \`\`\` (z. B. java, python, csharp, c, cpp, js, ts, html, css, sql, bash, powershell), sauber eingerückt und formatiert – auch wenn er nur diktiert/vorgelesen wurde. Einzelne Befehle, Klassen, Methoden, Dateinamen in \`Backticks\`.
 - Keine Emojis, keine Meta-Sätze wie "Der Lehrer erklärt …" – schreib den Lernstoff direkt und sachlich.`;
+
+  // Grundwortschatz HTL – hilft, falsch erkannte Fachbegriffe zu korrigieren
+  const HTL_TERMS = 'Interface, Klasse, Objekt, Instanz, Konstruktor, Vererbung, Polymorphie, Kapselung, Methode, Parameter, Rückgabewert, Array, ArrayList, HashMap, Stack, Queue, Rekursion, Algorithmus, Datenbank, SQL, SELECT, JOIN, Primärschlüssel, Fremdschlüssel, Normalform, Git, Commit, Branch, Merge, Pull Request, Framework, Angular, Component, Service, Observable, TypeScript, JavaScript, Java, C#, Python, HTML, CSS, API, REST, JSON, HTTP, Frontend, Backend, Deployment, Docker, Container, Server, Client, Router, Switch, VLAN, Subnetz, Subnetzmaske, IP-Adresse, IPv4, IPv6, DHCP, DNS, TCP, UDP, OSI-Modell, Gateway, Firewall, Ethernet, WLAN, Bandbreite, Latenz, Spannung, Strom, Widerstand, Ohm, Kondensator, Spule, Transistor, Diode, Mikrocontroller, Arduino, Sensor, Frequenz, Amplitude, Integral, Differential, Ableitung, Matrix, Vektor, Determinante, Logarithmus, Exponentialfunktion, Sinus, Kosinus, Tangens, Wahrscheinlichkeit, Varianz, Standardabweichung, Mathcad, Excel, Projektmanagement, Gantt, Scrum, Sprint, Kosten, Bilanz, Buchhaltung';
 
   function base(subject, settings) {
     const who = [settings.className && `Klasse ${settings.className}`].filter(Boolean).join(', ');
-    return `Du bist AutoDoku, ein Mitschrift-Assistent für einen Schüler einer HTL in Österreich${who ? ` (${who})` : ''}.
+    const glossary = [subject.glossary, settings.glossary].filter(Boolean).join(', ');
+    return `Du bist AutoDoku, ein Mitschrift-Assistent für einen Schüler einer HTL (höhere technische Schule) in Österreich${who ? ` (${who})` : ''}.
 Fach: ${subject.name}. ${KIND_HINTS[subject.kind] || KIND_HINTS.text}
-Sprache der Mitschrift: ${subject.notesLang || 'Deutsch'}.${subject.hints ? `\nZusätzliche Wünsche des Schülers für dieses Fach: ${subject.hints}` : ''}`;
+Sprache der Mitschrift: ${subject.notesLang || 'Deutsch'}. Im Unterricht wird Deutsch (oft österreichisch/umgangssprachlich) gesprochen, gemischt mit englischen Fachbegriffen – englische Fachbegriffe bleiben englisch und richtig geschrieben (z. B. "Interface", "Pull Request", nicht "Interfeis", "Pullrequest"). Wird ein Teil komplett auf Englisch gesprochen, übernimm ihn sinngemäß.
+FACHBEGRIFFE: Die Spracherkennung versteht Fachbegriffe oft falsch (z. B. "Ähre Liste" → ArrayList, "Sub Netz Maske" → Subnetzmaske, "Jason" → JSON, "Sequel" → SQL, "Get Hub" → GitHub). Korrigiere sie aus dem Zusammenhang.${glossary ? `\nWichtige Begriffe in diesem Fach (genau so schreiben): ${glossary}.` : ''}
+Typische Begriffe an der HTL: ${HTL_TERMS}.${settings.ruleListen ? `\nREGELN ZUM HÖREN/ERKENNEN (vom Schüler): ${settings.ruleListen}` : ''}${settings.ruleNotes ? `\nREGELN ZUM NOTIEREN (vom Schüler, haben Vorrang vor dem Stil unten): ${settings.ruleNotes}` : ''}${subject.hints ? `\nREGELN FÜR DIESES FACH (vom Schüler, haben Vorrang): ${subject.hints}` : ''}
+${ignoreBlock(settings)}`;
   }
+
+  // Was NICHT in die Mitschrift gehört (Witze, Abschweifungen …)
+  function ignoreBlock(settings) {
+    const parts = [];
+    if (settings.ignoreJokes !== false) parts.push('Witze, Sprüche, Ironie, Gelächter, Anekdoten und private Geschichten ohne Lernbezug, Smalltalk, Ermahnungen ("Handys weg", "Ruhe da hinten"), Organisatorisches (Anwesenheit, Fenster, Pausen), Störungen, Wiederholungen ohne neuen Inhalt. Woran du einen Witz erkennst: Übertreibung, Ironie, "Spaß beiseite", Lachen im Transkript, Bezug auf Personen statt auf den Stoff. Ausnahme: Hilft ein Witz oder eine Geschichte beim Merken (Eselsbrücke), übernimm nur die Merkhilfe als kurze TIPP-Box.');
+    if (settings.ruleIgnore) parts.push('Außerdem weglassen (Wunsch des Schülers): ' + settings.ruleIgnore);
+    return parts.length ? `WEGLASSEN: ${parts.join(' ')} Hausübungen, Tests, Abgaben und "kommt zur Schularbeit" aber IMMER erfassen.` : '';
+  }
+
+  // Fachbegriffe als eigene Notizen (Ordner "Begriffe")
+  function termsBlock(settings) {
+    if (!settings._terms) return '';
+    return `
+FACHBEGRIFFE ALS EIGENE NOTIZEN: Schreibe jeden wichtigen Fachbegriff bei der ERSTEN Erwähnung als Link [[Begriff]] (Grundform, Singular, ohne Artikel, z. B. [[Interface]], [[Diskriminante]]). Liste diese Begriffe (höchstens 12, nur echte Fachbegriffe) zusätzlich im Tag <terms>, je Zeile:
+Begriff | verständliche Erklärung in 2–4 Sätzen, mit kleinem Beispiel oder Formel (LaTeX)`;
+  }
+
+  const COMPLETE = `VOLLSTÄNDIG, ABER ALS NOTIZ: Nichts Inhaltliches auslassen – jede Erklärung, jedes Beispiel, jede Zahl, jede Formel, jeder Hinweis des Lehrers kommt vor. Aber NICHT wörtlich mitschreiben: in eigenen, knappen Worten als strukturierte Notiz (Stichpunkte, Boxen, Tabellen, Code-Blöcke). Füllwörter, Wiederholungen und Versprecher weglassen.`;
 
   // ---------- Live-Update ----------
   function live(subject, settings) {
@@ -40,7 +65,8 @@ Du hörst über ein Live-Transkript (automatische Spracherkennung: Fehler, fehle
 REGELN
 - Nur Lerninhalt dokumentieren. Ignoriere Smalltalk, Ermahnungen, Witze, Organisatorisches – AUSSER Hausübungen, Tests/Schularbeiten, Abgaben, Mitbringen: diese gehören in <tasks>.
 - Korrigiere offensichtliche Erkennungsfehler aus dem Kontext (v. a. Fachbegriffe). Erfinde keine Inhalte; knappe, eindeutige Ergänzungen (z. B. die vollständige Formel zu einem genannten Satz) sind erlaubt.
-- Zusammenfassen statt mitschreiben: knappe Stichpunkte, Definitionen/Formeln/Beispiele in Boxen.
+- ${COMPLETE}
+- Definitionen/Formeln/Beispiele in Boxen. Diktierter oder erklärter Code → als formatierter Code-Block.
 - Zeilen "[Notiz vom Schüler: …]" sind vom Schüler selbst getippt und besonders wichtig.
 - Nur der LETZTE Abschnitt darf überarbeitet werden (<replace_last>). Ein neues Thema → neuer Abschnitt (<append>). Nichts doppelt schreiben.
 - Enthält das neue Transkript nichts Inhaltliches, lass alle Tags leer.
@@ -112,7 +138,9 @@ AUFBAU
 ${n > 0 ? `4. Wo eine Abbildung beim Lernen wirklich hilft, füge höchstens ${n} Bildvorschläge ein, jeweils allein in einer Zeile: ![Bildunterschrift auf Deutsch](search:english+search+terms) – Suchbegriffe englisch, mit + statt Leerzeichen, möglichst "diagram"/"illustration". Die App sucht dazu ein frei lizenziertes Bild auf Wikimedia Commons.` : '4. Keine Bildvorschläge.'}
 5. Bei vielen Fachbegriffen: Abschnitt "## Begriffe" als Tabelle | Begriff | Bedeutung |.
 6. Zum Schluss "## Teste dich selbst" mit 3–5 nummerierten Fragen, danach eine Box "> [!TIPP] Lösungen" mit kurzen Lösungen.
-Korrigiere Erkennungsfehler, streiche Wiederholungen, ergänze nichts Erfundenes.
+${COMPLETE} Die finale Mitschrift darf NICHT weniger Inhalt haben als die Live-Mitschrift – nur besser geordnet.
+Korrigiere Erkennungsfehler und Fachbegriffe, streiche Wiederholungen, ergänze nichts Erfundenes.
+${termsBlock(settings)}
 
 ${FORMAT}
 
@@ -123,7 +151,7 @@ die komplette Mitschrift (ohne den Titel als Überschrift)
 </notes>
 <tasks>
 - [hausuebung|test|abgabe|mitbringen|info] Was genau | Termin
-</tasks>`;
+</tasks>${settings._terms ? '\n<terms>\nBegriff | Erklärung\n</terms>' : ''}`;
   }
 
   function finalUser({ transcript, notes, tasks, images, title }) {
@@ -140,6 +168,47 @@ ERFASSTE AUFGABEN: ${tasks || 'keine'}
 KOMPLETTES TRANSKRIPT (mit Minuten):
 """
 ${transcript || '(leer)'}
+"""`;
+  }
+
+  // ---------- Ergänzungen zur fertigen Mitschrift (für kleine/lokale KI) ----------
+  // Die Mitschrift selbst bleibt unverändert – die KI liefert nur kurze Zusatzteile.
+  function extras(subject, settings) {
+    return `${base(subject, settings)}
+
+Die Stunde ist vorbei, die Mitschrift ist fertig. Du schreibst NUR kurze Ergänzungen dazu – die Mitschrift selbst NICHT wiederholen. Nur Inhalte aus der Mitschrift verwenden, nichts erfinden. Mathe als $LaTeX$.
+
+ANTWORT – ausschließlich diese Tags:
+<title>prägnanter Titel der Stunde (max. 8 Wörter)</title>
+<summary>
+- 3 bis 6 Stichpunkte: das Wichtigste der Stunde
+</summary>
+<glossary>
+Begriff | Bedeutung in einem kurzen Satz
+(4 bis 10 wichtige Fachbegriffe, je Zeile einer)
+</glossary>
+<quiz>
+1. Testfrage
+(3 bis 5 Fragen)
+</quiz>
+<solutions>
+1. kurze Lösung zu Frage 1
+</solutions>
+<tasks>
+- [hausuebung|test|abgabe|mitbringen|info] Was genau | Termin (nur wenn in der Mitschrift erwähnt, sonst leer)
+</tasks>${settings._terms ? `
+<terms>
+Begriff | verständliche Erklärung in 2–4 Sätzen, mit kleinem Beispiel oder Formel (höchstens 8)
+</terms>` : ''}`;
+  }
+
+  function extrasUser({ notes, title, tasks }) {
+    return `TITEL BISHER: ${title || '(keiner)'}
+ERFASSTE AUFGABEN: ${tasks || 'keine'}
+
+MITSCHRIFT:
+"""
+${notes}
 """`;
   }
 
@@ -180,5 +249,35 @@ ANTWORT – ausschließlich so viele Blöcke wie verlangt, ohne weiteren Text:
 </card>`;
   }
 
-  root.Prompts = { live, liveUser, board, final, finalUser, recap, ask, studySheet, quiz };
+  // ---------- Dateien → Notizen (PDF, Foto, Video, Word …) ----------
+  const SOURCE = {
+    pdf: 'ein PDF (Skript, Arbeitsblatt, Folien oder Buchseiten; Text per Texterkennung extrahiert – Erkennungsfehler korrigieren)',
+    image: 'ein Foto/Screenshot (Text per Texterkennung extrahiert – Erkennungsfehler korrigieren, Formeln rekonstruieren)',
+    video: 'das Transkript eines Videos/einer Aufnahme (automatische Spracherkennung)',
+    audio: 'das Transkript einer Audioaufnahme (automatische Spracherkennung)',
+    docx: 'ein Word-Dokument',
+    text: 'ein Text',
+  };
+  function convert(kind, subject, settings, part) {
+    return `${base(subject, settings)}
+
+Du bekommst ${SOURCE[kind] || SOURCE.text}${part ? ` – Teil ${part.i} von ${part.n}` : ''}. Mach daraus Lern-Notizen für Obsidian.
+${COMPLETE}
+- Gliederung mit "## " (und "### "), logisch geordnet.
+- Mathematik als LaTeX, Code als formatierte \`\`\`sprache-Blöcke, Tabellen wo sinnvoll.
+- Aufgaben/Übungen aus dem Material als "> [!AUFGABE]"-Box übernehmen (mit Lösung nur, wenn sie im Material steht).
+- Unleserliches mit [?] markieren statt raten. Nichts erfinden.
+${termsBlock(settings)}
+${part && part.i > 1 ? '- Das ist eine Fortsetzung: KEINE Einleitung, KEINE Zusammenfassungs-Box, einfach mit den nächsten Abschnitten weitermachen.' : '- Beginne mit einer Box "> [!ZUSAMMENFASSUNG]" mit 3–6 Stichpunkten.'}
+
+${FORMAT}
+
+ANTWORT – ausschließlich:
+<title>kurzer, prägnanter Titel</title>
+<notes>
+die Notizen (ohne Titel als Überschrift)
+</notes>${settings._terms ? '\n<terms>\nBegriff | Erklärung\n</terms>' : ''}`;
+  }
+
+  root.Prompts = { live, liveUser, board, final, finalUser, extras, extrasUser, recap, ask, studySheet, quiz, convert, HTL_TERMS, ignoreBlock };
 })(window);

@@ -27,9 +27,14 @@
   CALLOUTS.WICHTIG = CALLOUTS.ACHTUNG;
   CALLOUTS.HINWEIS = CALLOUTS.INFO;
   CALLOUTS.SUMMARY = CALLOUTS.ZUSAMMENFASSUNG;
+  // Obsidian-Callouts (englische Namen) auf unsere Boxen abbilden
+  const ALIAS = { NOTE: 'INFO', ABSTRACT: 'ZUSAMMENFASSUNG', TLDR: 'ZUSAMMENFASSUNG', TIP: 'TIPP', HINT: 'TIPP', IMPORTANT: 'MERKE',
+    SUCCESS: 'TIPP', CHECK: 'TIPP', DONE: 'TIPP', QUESTION: 'AUFGABE', HELP: 'AUFGABE', FAQ: 'AUFGABE', TODO: 'AUFGABE',
+    WARNING: 'ACHTUNG', CAUTION: 'ACHTUNG', ATTENTION: 'ACHTUNG', FAILURE: 'ACHTUNG', FAIL: 'ACHTUNG', MISSING: 'ACHTUNG',
+    DANGER: 'ACHTUNG', ERROR: 'ACHTUNG', BUG: 'ACHTUNG', EXAMPLE: 'BEISPIEL', CITE: 'QUOTE', EXAM: 'PRUEFUNG', FORMULA: 'FORMEL' };
 
   // ---------- Inline ----------
-  const INLINE_RE = /(\\\$)|(\$\$[^$]+?\$\$)|(\$[^$\n]+?\$)|(`[^`\n]+`)|(\*\*\*[^*\n]+?\*\*\*)|(\*\*[^\n]+?\*\*)|(==[^\n]+?==)|(\*[^*\s\n][^*\n]*?\*)/g;
+  const INLINE_RE = /(!?\[\[[^\]\n]+\]\])|(\[[^\]\n]+\]\((?:[^()\s]|\([^()\s]*\))+\))|((?<=^|\s)#[A-Za-zÄÖÜäöüß0-9_\/-]*[A-Za-zÄÖÜäöüß_][A-Za-zÄÖÜäöüß0-9_\/-]*)|(\\\$)|(\$\$[^$]+?\$\$)|(\$[^$\n]+?\$)|(`[^`\n]+`)|(\*\*\*[^*\n]+?\*\*\*)|(\*\*[^\n]+?\*\*)|(==[^\n]+?==)|(\*[^*\s\n][^*\n]*?\*)/g;
 
   function parseInline(s, marks) {
     marks = marks || {};
@@ -42,14 +47,22 @@
     while ((m = re.exec(s))) {
       push(s.slice(last, m.index));
       const tok = m[0];
-      if (m[1]) push('$');
-      else if (m[2]) out.push(Object.assign({ k: 'math', v: tok.slice(2, -2).trim() }, marks));
-      else if (m[3]) out.push(Object.assign({ k: 'math', v: tok.slice(1, -1).trim() }, marks));
-      else if (m[4]) out.push(Object.assign({ k: 'code', v: tok.slice(1, -1) }, marks));
-      else if (m[5]) out.push(...parseInline(tok.slice(3, -3), Object.assign({}, marks, { b: true, i: true })));
-      else if (m[6]) out.push(...parseInline(tok.slice(2, -2), Object.assign({}, marks, { b: true })));
-      else if (m[7]) out.push(...parseInline(tok.slice(2, -2), Object.assign({}, marks, { hl: true })));
-      else if (m[8]) out.push(...parseInline(tok.slice(1, -1), Object.assign({}, marks, { i: true })));
+      if (m[1]) {
+        const embed = tok.startsWith('!');
+        const inner = tok.slice(embed ? 3 : 2, -2);
+        const [target, alias] = inner.split('|');
+        out.push(Object.assign({ k: embed ? 'embed' : 'wikilink', target: target.trim(), alias: (alias || '').trim() }, marks));
+      }
+      else if (m[2]) { const mm = /^\[([^\]]+)\]\((.+)\)$/.exec(tok); out.push(Object.assign({ k: 'link', v: mm[1], href: mm[2] }, marks)); }
+      else if (m[3]) out.push(Object.assign({ k: 'tag', v: tok }, marks));
+      else if (m[4]) push('$');
+      else if (m[5]) out.push(Object.assign({ k: 'math', v: tok.slice(2, -2).trim() }, marks));
+      else if (m[6]) out.push(Object.assign({ k: 'math', v: tok.slice(1, -1).trim() }, marks));
+      else if (m[7]) out.push(Object.assign({ k: 'code', v: tok.slice(1, -1) }, marks));
+      else if (m[8]) out.push(...parseInline(tok.slice(3, -3), Object.assign({}, marks, { b: true, i: true })));
+      else if (m[9]) out.push(...parseInline(tok.slice(2, -2), Object.assign({}, marks, { b: true })));
+      else if (m[10]) out.push(...parseInline(tok.slice(2, -2), Object.assign({}, marks, { hl: true })));
+      else if (m[11]) out.push(...parseInline(tok.slice(1, -1), Object.assign({}, marks, { i: true })));
       last = m.index + tok.length;
     }
     push(s.slice(last));
@@ -91,6 +104,19 @@
     const flushList = () => { if (list) blocks.push(list); list = null; };
     const flush = () => { flushPara(); flushList(); };
 
+    // YAML-Frontmatter (Eigenschaften wie in Obsidian)
+    if (lines[0] && lines[0].trim() === '---') {
+      const end = lines.indexOf('---', 1);
+      if (end > 0) {
+        const props = lines.slice(1, end).filter(l => l.trim()).map(l => {
+          const k = l.indexOf(':');
+          return k > 0 ? [l.slice(0, k).trim(), l.slice(k + 1).trim().replace(/^["']|["']$/g, '')] : ['', l.trim()];
+        });
+        blocks.push({ type: 'frontmatter', props, line: 0 });
+        i = end + 1;
+      }
+    }
+
     while (i < lines.length) {
       const raw = lines[i];
       const line = raw.trimEnd();
@@ -106,7 +132,7 @@
         i++;
         while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++; }
         i++;
-        blocks.push({ type: 'code', lang, text: buf.join('\n') });
+        blocks.push({ type: 'code', lang, text: buf.join('\n'), line: i });
         continue;
       }
 
@@ -140,6 +166,10 @@
       // Trennlinie
       if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) { flush(); blocks.push({ type: 'hr' }); i++; continue; }
 
+      // Obsidian-Einbettung ![[datei]]
+      const emb = /^!\[\[([^\]|]+)(?:\|([^\]]*))?\]\]\s*$/.exec(t);
+      if (emb) { flush(); blocks.push({ type: 'img', alt: '', src: 'vault:' + emb[1].trim(), size: emb[2] || '', embed: true, line: i }); i++; continue; }
+
       // Bild
       const img = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)\s*$/.exec(t);
       if (img) { flush(); blocks.push({ type: 'img', alt: img[1], src: img[2], title: img[3] || '' }); i++; continue; }
@@ -153,9 +183,10 @@
           i++;
         }
         let kind = 'QUOTE', title = '';
-        const head = /^\[!([A-Za-zÄÖÜäöü]+)\]\s*(.*)$/.exec(buf[0] || '');
+        const head = /^\[!([A-Za-zÄÖÜäöü-]+)\][+-]?\s*(.*)$/.exec(buf[0] || '');
         if (head) {
           kind = head[1].toUpperCase();
+          if (ALIAS[kind]) kind = ALIAS[kind];
           if (!CALLOUTS[kind]) kind = 'INFO';
           title = head[2] || '';
           buf.shift();
@@ -193,7 +224,7 @@
         const cb = /^\[( |x|X)\]\s+(.*)$/.exec(text);
         if (cb) { check = cb[1] !== ' '; text = cb[2]; }
         if (!list) list = { type: 'list', items: [] };
-        list.items.push({ level, ordered, start, check, text, inl: null });
+        list.items.push({ level, ordered, start, check, text, inl: null, line: i });
         i++;
         // Fortsetzungszeilen
         while (i < lines.length && lines[i].trim() && !LIST_RE.test(lines[i]) && /^\s{2,}/.test(lines[i]) &&
@@ -233,6 +264,10 @@
       let h;
       if (n.k === 'math') h = mathHtml(n.v, false);
       else if (n.k === 'code') h = `<code>${escHtml(n.v)}</code>`;
+      else if (n.k === 'wikilink') h = `<a class="wikilink" data-wiki="${escHtml(n.target)}" href="#">${escHtml(n.alias || n.target.replace(/#.*$/, ''))}</a>`;
+      else if (n.k === 'embed') h = `<span class="inline-embed" data-embed="${escHtml(n.target)}">${escHtml(n.target)}</span>`;
+      else if (n.k === 'link') h = `<a class="extlink" href="${escHtml(n.href)}" data-href="${escHtml(n.href)}">${escHtml(n.v)}</a>`;
+      else if (n.k === 'tag') h = `<span class="tag" data-tag="${escHtml(n.v)}">${escHtml(n.v)}</span>`;
       else h = escHtml(n.v);
       if (n.hl) h = `<mark>${h}</mark>`;
       if (n.i) h = `<em>${h}</em>`;
@@ -258,7 +293,7 @@
       } else {
         html += '</li>';
       }
-      const box = it.check === null ? '' : `<span class="cbx ${it.check ? 'on' : ''}">${it.check ? '✓' : ''}</span>`;
+      const box = it.check === null ? '' : `<span class="cbx ${it.check ? 'on' : ''}" data-line="${it.line}">${it.check ? '✓' : ''}</span>`;
       html += `<li>${box}${inlineHtml(it.inl)}`;
     }
     while (stack.length) html += `</li></${stack.pop()}>`;
@@ -276,8 +311,19 @@
         case 'h': return `<h${b.level + 0}>${inlineHtml(b.inl)}</h${b.level + 0}>`;
         case 'p': return `<p>${inlineHtml(b.inl)}</p>`;
         case 'hr': return '<hr>';
-        case 'math': return `<div class="math-block">${mathHtml(b.tex, true)}</div>`;
-        case 'code': return `<pre class="code"><code>${escHtml(b.text)}</code></pre>`;
+        case 'math': return `<div class="math-block" data-tex="${escHtml(b.tex)}">${mathHtml(b.tex, true)}${opts.mathActions ? '<div class="math-actions"><button class="btn tiny" data-action="copy-mathcad" title="In Mathcad-Schreibweise kopieren">📋 Mathcad</button><button class="btn tiny" data-action="copy-latex" title="LaTeX kopieren">TeX</button></div>' : ''}</div>`;
+        case 'code': {
+          let body = escHtml(b.text);
+          if (root.hljs) {
+            try {
+              const lang = (b.lang || '').toLowerCase();
+              body = lang && root.hljs.getLanguage(lang) ? root.hljs.highlight(b.text, { language: lang }).value : root.hljs.highlightAuto(b.text).value;
+            } catch (e) { /* ohne Farben */ }
+          }
+          return `<pre class="code hljs"${b.lang ? ` data-lang="${escHtml(b.lang)}"` : ''}>${opts.mathActions ? '<button class="btn tiny code-copy" data-action="copy-code">Kopieren</button>' : ''}<code>${body}</code></pre>`;
+        }
+        case 'frontmatter':
+          return `<div class="props">${b.props.map(([k, v]) => `<div class="prop"><span class="pk">${escHtml(k)}</span><span class="pv">${escHtml(v)}</span></div>`).join('')}</div>`;
         case 'list': return listHtml(b.items);
         case 'callout': {
           const c = CALLOUTS[b.kind] || CALLOUTS.INFO;
@@ -296,6 +342,10 @@
           }
           const r = opts.resolveImage ? opts.resolveImage(b.src) : { url: b.src };
           if (!r) return '';
+          if (r.kind === 'note' || r.kind === 'file') return `<div class="embed-card" data-open="${escHtml(r.path || '')}">${r.kind === 'note' ? '📄' : '📎'} ${escHtml(r.label || b.src)}</div>`;
+          if (r.kind === 'video') return `<video class="embed-media" src="${escHtml(r.url)}" controls preload="metadata"></video>`;
+          if (r.kind === 'audio') return `<audio class="embed-media" src="${escHtml(r.url)}" controls preload="metadata"></audio>`;
+          if (r.kind === 'pdf') return `<div class="embed-card" data-open="${escHtml(r.path || '')}">📕 ${escHtml(r.label || b.src)}</div>`;
           const actions = opts.figureActions ? `<div class="fig-actions"><button class="btn tiny" data-action="swap-image" title="Anderes Bild suchen">🔄</button><button class="btn tiny" data-action="drop-image" title="Aus Mitschrift entfernen">✕</button></div>` : '';
           return `<figure data-src="${escHtml(b.src)}" data-alt="${escHtml(b.alt)}">${actions}<img src="${escHtml(r.url)}" alt="${escHtml(b.alt)}" loading="lazy"><figcaption>${escHtml(b.alt || r.caption || '')}${r.credit ? `<span class="credit">${escHtml(r.credit)}</span>` : ''}</figcaption></figure>`;
         }

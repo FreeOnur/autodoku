@@ -90,6 +90,10 @@
         const om = LatexOMML.latexToOMML(n.v, { display: false });
         return n.hl ? om.split('</w:rPr>').join('<w:highlight w:val="yellow"/></w:rPr>') : om;
       }
+      if (n.k === 'embed') return '';
+      if (n.k === 'wikilink') n = Object.assign({}, n, { k: 'text', v: n.alias || n.target });
+      else if (n.k === 'link') n = Object.assign({}, n, { k: 'text', v: n.v });
+      else if (n.k === 'tag') n = Object.assign({}, n, { k: 'text' });
       const o = Object.assign({}, base);
       if (n.b) o.b = true;
       if (n.i) o.i = true;

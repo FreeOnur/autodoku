@@ -14,24 +14,32 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="vendor/hljs/github-dark.min.css">
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
   <div id="app" class="app">
     <header class="topbar">
+      <button class="icon-btn sb-toggle" id="btn-sidebar" title="Ordner ein-/ausblenden" aria-label="Ordner">☰</button>
       <a href="#/" class="brand" aria-label="AutoDoku Startseite">
         <img src="icons/icon-192.png" alt="" width="30" height="30">
         <span>Auto<b>Doku</b></span>
       </a>
       <div class="topbar-mid" id="topbar-mid"></div>
       <div class="topbar-right">
+        <button class="icon-btn nav-phone" id="btn-phone" title="Handy als Tafel-Kamera/Mikrofon verbinden">📱</button>
+        <a class="btn small ghost nav-notes" href="#/notes" title="Notizordner (Strg+O = Datei suchen)">🗂️ <span class="lbl">Notizen</span></a>
+        <a class="btn small ghost nav-lessons" href="#/" title="Unterricht aufnehmen">🎙 <span class="lbl">Unterricht</span></a>
         <button class="icon-btn" id="btn-settings" title="Einstellungen" aria-label="Einstellungen">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
       </div>
     </header>
-    <main id="view" class="view"></main>
+    <div class="workspace">
+      <aside id="sidebar" class="sidebar" aria-label="Notizordner"></aside>
+      <main id="view" class="view"></main>
+    </div>
   </div>
 
   <div id="modal-root"></div>
@@ -39,8 +47,8 @@
   <input type="file" id="photo-input" accept="image/*" capture="environment" multiple hidden>
   <input type="file" id="import-input" accept="application/json,.json" hidden>
 
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" crossorigin="anonymous"></script>
+  <script src="vendor/katex/katex.min.js"></script>
+  <script src="vendor/jszip/jszip.min.js"></script>
   <script src="js/latex2omml.js"></script>
   <script src="js/markdown.js"></script>
   <script src="js/docx.js"></script>
@@ -49,7 +57,15 @@
   <script src="js/ai.js"></script>
   <script src="js/prompts.js"></script>
   <script src="js/speech.js"></script>
+  <script src="js/whisper.js"></script>
+  <script src="js/setup.js"></script>
   <script src="js/images.js"></script>
+  <script src="vendor/hljs/highlight.min.js"></script>
+  <script src="vendor/mammoth/mammoth.browser.min.js"></script>
+  <script src="js/vault.js"></script>
+  <script src="js/convert.js"></script>
+  <script src="js/rules.js"></script>
   <script src="js/app.js"></script>
+  <script src="js/desktop.js"></script>
 </body>
 </html>

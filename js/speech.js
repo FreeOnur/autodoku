@@ -121,14 +121,10 @@
         if (err === 'network') {
           this.netErrors++;
           if (this.netErrors === 1) {
-            // Server nicht erreichbar (oft: Schul-WLAN blockiert Google) -> Offline-Erkennung anbieten
+            // Google-Server nicht erreichbar (oft: Schul-WLAN blockiert) -> Offline-Paket, sonst Whisper/Gemini
             const st = await localStatus(this.lang);
             if (st.status === 'available') { this.useLocal(st.lang); return; }
-            if (st.status === 'downloadable' || st.status === 'downloading') {
-              this.want = false;
-              this.h.onNeedLocal && this.h.onNeedLocal(st);
-              return;
-            }
+            if (this.h.onFallback) { this.want = false; this.h.onFallback('network'); return; }
             if (!this.warned) {
               this.warned = true;
               this.h.onError && this.h.onError('Die Google-Spracherkennung ist nicht erreichbar (oft blockiert das Schul-WLAN sie). Tipp: Handy-Hotspot verwenden.', false);

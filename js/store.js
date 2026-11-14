@@ -64,16 +64,21 @@
   // ---------- Einstellungen ----------
   const DEFAULT_SETTINGS = {
     apiKey: '',
-    provider: 'auto',      // auto | chrome | gemini | claude
+    provider: 'auto',      // auto | claude | ollama | gemini | openai | chrome
+    speechEngine: 'auto',  // auto | local | groq | gemini | google | whisper
     geminiKey: '',
+    groqKey: '',           // Groq (gratis): Whisper large-v3 in der Cloud
+    ollamaModel: '',       // leer = passend zum Arbeitsspeicher
+    groqModel: 'whisper-large-v3',
+    localPower: 'normal',  // lokale KI & Spracherkennung: leise | normal | schnell (wie viele Kerne)
     geminiLive: '',
     geminiFinal: '',
-    mode: 'spar',          // spar | normal | ende
+    mode: 'normal',        // spar | normal | ende
     liveUpdates: true,     // false = nur Transkript, Zusammenfassung erst bei "Fertig"
     modelLive: 'claude-haiku-5-5',
-    modelFinal: 'claude-haiku-5-5',
-    interval: 90,          // Sekunden zwischen Live-Updates
-    minWords: 50,          // min. neue Wörter für ein Update
+    modelFinal: 'claude-sonnet-5-5',
+    interval: 75,          // Sekunden zwischen Live-Updates
+    minWords: 45,          // min. neue Wörter für ein Update
     studentName: '',
     className: '',
     appendTranscript: false,
@@ -81,6 +86,24 @@
     maxImageSuggestions: 3,
     autoFinalize: true,
     keepAwake: true,
+    speechLang: 'fach',    // fach = Sprache des Fachs (Deutsch schreibt englische Fachbegriffe mit) | auto = selbst erkennen (experimentell)
+    whisperModel: 'base',  // base (schnell) | small (genauer)
+    micId: '', micLabel: '', // gewähltes Mikrofon (leer = Standard)
+    glossary: '',          // eigene Fachbegriffe für alle Fächer
+    vaultSync: true,       // Stunden automatisch als .md in den Notizordner
+    vaultTranscript: true, // Transkript zusätzlich in "Transkripte"
+    autoConvert: true,     // neue PDFs/Fotos/Videos automatisch in Notizen umwandeln
+    // Regeln (eigene Anweisungen an die KI)
+    ruleNotes: '',         // wie notieren/zusammenfassen
+    ruleListen: '',        // Hören/Erkennen (z. B. "der Lehrer sagt 'Strich' für Ableitung")
+    ruleIgnore: '',        // was zusätzlich weglassen
+    ignoreJokes: true,     // Witze, Abschweifungen, Ermahnungen weglassen
+    termNotes: true,       // Fachbegriffe als eigene Notizen
+    termFolder: 'Begriffe',
+    // Eigene KI-API (OpenAI-kompatibel)
+    oaPreset: 'openai', oaBase: '', oaKey: '', oaModel: '', oaModelLive: '', oaVision: true,
+    // Handy
+    phoneAutoPhoto: true,
   };
 
   function loadJSON(key, fallback) {
@@ -98,24 +121,32 @@
   };
 
   const Settings = {
-    get() { return Object.assign({}, DEFAULT_SETTINGS, loadJSON('autodoku.settings', {})); },
+    get() {
+      const s = Object.assign({}, DEFAULT_SETTINGS, loadJSON('autodoku.settings', {}));
+      return s;
+    },
     set(patch) { const s = Object.assign(Settings.get(), patch); saveJSON('autodoku.settings', s); return s; },
   };
 
   // ---------- Fächer ----------
   const DEFAULT_SUBJECTS = [
-    { id: 'mathe', name: 'Mathematik', emoji: '📐', color: '#3B82F6', kind: 'math', speechLang: 'de-AT', notesLang: 'Deutsch' },
-    { id: 'swp', name: 'SWP / Programmieren', emoji: '💻', color: '#10B981', kind: 'code', speechLang: 'de-AT', notesLang: 'Deutsch' },
-    { id: 'physik', name: 'Physik', emoji: '⚛️', color: '#8B5CF6', kind: 'math', speechLang: 'de-AT', notesLang: 'Deutsch' },
+    { id: 'mathe', glossary: 'Funktion, Ableitung, Integral, Grenzwert, Matrix, Vektor, Determinante, Logarithmus, Exponentialfunktion, Polynom, Nullstelle, Diskriminante, Mathcad', name: 'Mathematik', emoji: '📐', color: '#3B82F6', kind: 'math', speechLang: 'de-AT', notesLang: 'Deutsch' },
+    { id: 'swp', glossary: 'Java, C#, Python, TypeScript, Angular, Interface, Klasse, Objekt, Konstruktor, Vererbung, Polymorphie, Exception, ArrayList, HashMap, Lambda, Stream, Git, Commit, Branch, Merge, Pull Request, Unit Test, JUnit, REST, API, JSON, SQL, Design Pattern, Singleton, Observer, MVC', name: 'SWP / Programmieren', emoji: '💻', color: '#10B981', kind: 'code', speechLang: 'de-AT', notesLang: 'Deutsch' },
+    { id: 'physik', glossary: 'Kraft, Energie, Leistung, Impuls, Spannung, Strom, Widerstand, Feldstärke, Frequenz, Wellenlänge', name: 'Physik', emoji: '⚛️', color: '#8B5CF6', kind: 'math', speechLang: 'de-AT', notesLang: 'Deutsch' },
     { id: 'deutsch', name: 'Deutsch', emoji: '📖', color: '#EF4444', kind: 'text', speechLang: 'de-AT', notesLang: 'Deutsch' },
-    { id: 'englisch', name: 'Englisch', emoji: '🇬🇧', color: '#F59E0B', kind: 'lang', speechLang: 'en-GB', notesLang: 'Englisch (Vokabeln mit deutscher Übersetzung)' },
-    { id: 'netzwerk', name: 'Netzwerktechnik', emoji: '🌐', color: '#06B6D4', kind: 'code', speechLang: 'de-AT', notesLang: 'Deutsch' },
-    { id: 'wirtschaft', name: 'Wirtschaft & Recht', emoji: '📊', color: '#EC4899', kind: 'text', speechLang: 'de-AT', notesLang: 'Deutsch' },
+    { id: 'englisch', glossary: '', name: 'Englisch', emoji: '🇬🇧', color: '#F59E0B', kind: 'lang', speechLang: 'en-GB', notesLang: 'Englisch (Vokabeln mit deutscher Übersetzung)' },
+    { id: 'netzwerk', glossary: 'OSI-Modell, TCP/IP, IPv4, IPv6, Subnetzmaske, CIDR, VLAN, Router, Switch, Gateway, DHCP, DNS, NAT, ARP, MAC-Adresse, Ethernet, Packet Tracer, Cisco, OSPF, Trunk, Access Port', name: 'Netzwerktechnik', emoji: '🌐', color: '#06B6D4', kind: 'code', speechLang: 'de-AT', notesLang: 'Deutsch' },
+    { id: 'wirtschaft', glossary: 'Bilanz, GuV, Kostenrechnung, Deckungsbeitrag, Break-even, Marketing, Kalkulation, Umsatzsteuer, Projektmanagement', name: 'Wirtschaft & Recht', emoji: '📊', color: '#EC4899', kind: 'text', speechLang: 'de-AT', notesLang: 'Deutsch' },
     { id: 'geschichte', name: 'Geschichte', emoji: '🏛️', color: '#A16207', kind: 'text', speechLang: 'de-AT', notesLang: 'Deutsch' },
   ];
 
   const Subjects = {
-    all() { return loadJSON('autodoku.subjects', null) || DEFAULT_SUBJECTS.slice(); },
+    all() {
+      const saved = loadJSON('autodoku.subjects', null);
+      if (!saved) return DEFAULT_SUBJECTS.slice();
+      // ältere Fächer bekommen die Standard-Fachbegriffe dazu
+      return saved.map(x => { const d = DEFAULT_SUBJECTS.find(y => y.id === x.id); return x.glossary == null && d ? Object.assign({}, x, { glossary: d.glossary || '' }) : x; });
+    },
     save(list) { saveJSON('autodoku.subjects', list); },
     get(id) { return Subjects.all().find(s => s.id === id) || { id, name: 'Allgemein', emoji: '📝', color: '#64748B', kind: 'text', speechLang: 'de-AT', notesLang: 'Deutsch' }; },
     upsert(sub) {

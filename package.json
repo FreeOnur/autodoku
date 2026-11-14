@@ -1,0 +1,51 @@
+{
+  "name": "autodoku",
+  "productName": "AutoDoku",
+  "version": "3.3.0",
+  "description": "Live-Mitschrift für die Schule – hört im Unterricht mit und schreibt saubere Notizen mit echten Word-Formeln.",
+  "main": "desktop/main.js",
+  "author": "FreeOnur",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "homepage": "https://github.com/FreeOnur/autodoku",
+  "repository": { "type": "git", "url": "https://github.com/FreeOnur/autodoku.git" },
+  "scripts": {
+    "start": "electron .",
+    "web": "node server.js",
+    "dist": "electron-builder --win --x64",
+    "release": "electron-builder --win --x64 --publish always"
+  },
+  "devDependencies": {
+    "electron": "44.9.1",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "io.github.freeonur.autodoku",
+    "productName": "AutoDoku",
+    "copyright": "© 2026 FreeOnur",
+    "asar": false,
+    "directories": { "output": "dist", "buildResources": "build" },
+    "files": [
+      "index.html", "mini.html", "manifest.webmanifest", "sw.js", "package.json",
+      "css/**", "js/**", "icons/**", "phone/**", "vendor/**", "desktop/**",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "icons/autodoku.ico",
+      "artifactName": "AutoDoku-Setup.exe"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "AutoDoku",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "installerIcon": "icons/autodoku.ico",
+      "uninstallerIcon": "icons/autodoku.ico"
+    },
+    "publish": [{ "provider": "github", "owner": "FreeOnur", "repo": "autodoku", "releaseType": "release" }]
+  }
+}

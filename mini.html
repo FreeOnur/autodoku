@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>AutoDoku Mini</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; background: transparent; font: 13px/1.3 "Segoe UI", Inter, system-ui, sans-serif; color: #E7EFEB; overflow: hidden; user-select: none; }
+  .bar { margin: 6px; border-radius: 14px; background: rgba(15, 25, 22, .96); border: 1px solid #2C413B; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+  .row { display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 12px; -webkit-app-region: drag; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #5E756C; flex: none; }
+  .dot.rec { background: #FF4D5A; box-shadow: 0 0 0 3px rgba(255,77,90,.25); animation: p 1.6s infinite; }
+  @keyframes p { 50% { box-shadow: 0 0 0 6px rgba(255,77,90,0); } }
+  .info { flex: 1; min-width: 0; }
+  .info b { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .info small { color: #8FA59C; font-variant-numeric: tabular-nums; }
+  button { -webkit-app-region: no-drag; border: 1px solid #2C413B; background: #172521; color: inherit; border-radius: 9px; height: 30px; min-width: 30px; padding: 0 8px; cursor: pointer; font-size: 14px; }
+  button:hover { background: #22332E; }
+  button.rec { background: #FF4D5A; border-color: #FF4D5A; color: #fff; font-weight: 700; }
+  .note { display: none; padding: 0 8px 8px; gap: 6px; }
+  .note.on { display: flex; }
+  .note input { flex: 1; min-width: 0; height: 30px; border-radius: 9px; border: 1px solid #2C413B; background: #0F1916; color: inherit; padding: 0 10px; outline: none; font: inherit; }
+  .note input:focus { border-color: #7CF3C3; }
+</style>
+</head>
+<body>
+<div class="bar" id="bar">
+  <div class="row">
+    <span class="dot" id="dot"></span>
+    <div class="info"><b id="sub">AutoDoku</b><small id="time">bereit</small></div>
+    <button id="rec" title="Aufnahme starten/pausieren (Strg+Alt+R)">⏺</button>
+    <button id="note" title="Schnellnotiz (Strg+Alt+N)">✍️</button>
+    <button id="show" title="AutoDoku öffnen (Strg+Alt+A)">⤢</button>
+    <button id="close" title="Mini-Fenster schließen (Strg+Alt+K)">✕</button>
+  </div>
+  <form class="note" id="nf"><input id="ni" placeholder="Notiz, z. B. „kommt zur SA“ – Enter" autocomplete="off"><button type="submit">↵</button></form>
+</div>
+<script>
+  const D = window.desktopAPI;
+  const $ = (id) => document.getElementById(id);
+  const fmt = (ms) => { const s = Math.floor((ms || 0) / 1000); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); };
+  let st = { recording: false, ms: 0 }, base = Date.now();
+  function render() {
+    $('dot').classList.toggle('rec', !!st.recording);
+    $('sub').textContent = st.subject ? (st.subject + (st.title ? ' · ' + st.title : '')) : 'AutoDoku';
+    const ms = (st.ms || 0) + (st.recording ? Date.now() - base : 0);
+    $('time').textContent = st.recording ? '● Aufnahme ' + fmt(ms) : (st.subject ? '⏸ pausiert ' + fmt(ms) : 'keine Stunde offen');
+    $('rec').textContent = st.recording ? '⏸' : '⏺';
+    $('rec').classList.toggle('rec', !st.recording && !!st.subject);
+  }
+  D.onState((s) => { st = s; base = Date.now(); render(); });
+  setInterval(render, 1000);
+  const fit = () => D.miniCmd({ cmd: 'resize', h: document.getElementById('bar').offsetHeight + 12 });
+  $('rec').onclick = () => D.miniCmd({ cmd: 'toggleRec' });
+  $('show').onclick = () => D.miniCmd({ cmd: 'show' });
+  $('close').onclick = () => D.miniCmd({ cmd: 'close' });
+  const openNote = () => { $('nf').classList.add('on'); fit(); setTimeout(() => $('ni').focus(), 30); };
+  $('note').onclick = () => { if ($('nf').classList.contains('on')) { $('nf').classList.remove('on'); fit(); } else openNote(); };
+  D.onFocusNote(openNote);
+  $('nf').onsubmit = (e) => { e.preventDefault(); const t = $('ni').value.trim(); if (t) D.miniCmd({ cmd: 'note', text: t }); $('ni').value = ''; $('nf').classList.remove('on'); fit(); };
+  $('ni').onkeydown = (e) => { if (e.key === 'Escape') { $('nf').classList.remove('on'); fit(); } };
+  render();
+</script>
+</body>
+</html>

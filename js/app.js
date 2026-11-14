@@ -159,13 +159,89 @@
     saveTimer: null,
   };
 
+  // Speichern verzögert – je Stunde ein eigener Timer (sonst verschluckt z. B. die Handy-Aufnahme
+  // das Speichern der Laptop-Stunde oder umgekehrt)
+  const saveTimers = {};
   function save(s) {
     s = s || st.session;
     if (!s) return;
-    clearTimeout(st.saveTimer);
-    st.saveTimer = setTimeout(() => Sessions.put(s).catch(e => toast('Speichern fehlgeschlagen: ' + esc(e.message), 'err')), 400);
+    clearTimeout(saveTimers[s.id]);
+    saveTimers[s.id] = setTimeout(() => { delete saveTimers[s.id]; Sessions.put(s).catch(e => toast('Speichern fehlgeschlagen: ' + esc(e.message), 'err')); }, 400);
+    scheduleVaultSync(s);
   }
-  function saveNow(s) { clearTimeout(st.saveTimer); return Sessions.put(s || st.session); }
+  function saveNow(s) { s = s || st.session; clearTimeout(saveTimers[s.id]); delete saveTimers[s.id]; scheduleVaultSync(s, true); return Sessions.put(s); }
+
+  // ============ Notizordner: jede Stunde automatisch als .md (wie Obsidian) ============
+  const vaultOn = () => !!(window.Vault && Vault.available && Vault.V.root && Settings.get().vaultSync);
+  const syncTimers = {}, lastSync = {};
+  function scheduleVaultSync(s, now) {
+    if (!s || !vaultOn()) return;
+    clearTimeout(syncTimers[s.id]);
+    syncTimers[s.id] = setTimeout(() => syncToVault(s).catch(e => console.warn('Notizordner', e)), now ? 50 : 4000);
+  }
+  const localDate = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+  function dataUrlBytes(u) { const b = atob(u.split(',')[1]); const a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
+
+  async function syncToVault(s) {
+    if (!vaultOn()) return;
+    const md = notesMd(s);
+    if (!md.trim() && !(s.tasks || []).length) return;
+    const set = Settings.get();
+    const sub = Subjects.get(s.subjectId);
+    const folder = Vault.safeName(sub.name.replace(/\s*\/\s*/g, ' & '));
+    const date = localDate(s.createdAt);
+    const name = `${date} ${Vault.safeName(s.title || (s.kind === 'study' ? 'Lernzettel' : 'Stunde'))}`;
+    let target = Vault.join(folder, name + '.md');
+    const API = window.vaultAPI;
+    if (s.vaultPath && await API.exists(s.vaultPath)) {
+      // vom Schüler im Notizordner bearbeitet? -> nicht überschreiben
+      const stt = await API.stat(s.vaultPath);
+      if (s.vaultMtime && stt.mtime > s.vaultMtime + 2000) {
+        if (!s.vaultLocked) { s.vaultLocked = true; await Sessions.put(s); toast(`🗂️ Du hast <b>${esc(Vault.baseName(s.vaultPath))}</b> im Notizordner bearbeitet – AutoDoku überschreibt sie nicht mehr.`, 'warn', 7000); }
+        return;
+      }
+      if (s.vaultPath !== target) {
+        if (await API.exists(target)) target = s.vaultPath;
+        else {
+          await API.rename(s.vaultPath, target);
+          if (s.vaultTranscript && await API.exists(s.vaultTranscript)) {
+            const nt = Vault.join(folder, 'Transkripte', name + ' (Transkript).md');
+            if (!(await API.exists(nt))) { await API.rename(s.vaultTranscript, nt); s.vaultTranscript = nt; }
+          }
+        }
+      }
+    } else if (s.vaultLocked) return;
+    else if (await API.exists(target)) target = Vault.uniquePath(target);
+
+    // Fotos nach "Anhänge"
+    s.vaultImgs = s.vaultImgs || {};
+    for (const [id, im] of Object.entries(s.images || {})) {
+      if (!im.dataUrl || s.vaultImgs[id] || !md.includes('img:' + id)) continue;
+      const file = `${date}_${slug(s.title || 'Stunde').slice(0, 30)}_${id.slice(-6)}.jpg`;
+      await Vault.write(Vault.join(folder, 'Anhänge', file), dataUrlBytes(im.dataUrl));
+      s.vaultImgs[id] = 'Anhänge/' + file;
+    }
+    let body = md
+      .replace(/!\[([^\]]*)\]\(img:([^)\s]+)\)/g, (m0, alt, id) => s.vaultImgs[id] ? `![${alt}](${s.vaultImgs[id]})${s.images[id] && s.images[id].credit ? `\n*${s.images[id].credit}*` : ''}` : '')
+      .replace(/^!\[[^\]]*\]\(search:[^)]*\)\s*$/gm, '');
+    const tasks = (s.tasks || []).map(t => `- [${t.done ? 'x' : ' '}] ${t.text}${t.due ? ` (📅 ${t.due})` : ''}`).join('\n');
+    const tags = ['autodoku', slug(sub.name).toLowerCase()].join(', ');
+    const front = `---\nfach: ${sub.name}\ndatum: ${date}\n${s.durationMs >= 60000 ? `dauer: ${fmtDur(s.durationMs)}\n` : ''}status: ${s.status === 'final' ? 'fertig' : s.kind === 'study' ? 'lernzettel' : 'live'}\ntags: [${tags}]\n---\n`;
+    if (set.vaultTranscript && s.segments.length) {
+      const tp = s.vaultTranscript || Vault.join(folder, 'Transkripte', name + ' (Transkript).md');
+      if (lastSync['t' + s.id] !== s.segments.length) {
+        await Vault.write(tp, `---\nfach: ${sub.name}\ndatum: ${date}\ntags: [autodoku, transkript]\n---\n# Transkript: ${s.title || 'Stunde'}\n\nMitschrift: [[${name}]]\n\n` + s.segments.map(x => `**${mmss(x.t)}** ${x.kind === 'note' ? '✍️ ' : ''}${x.text}`).join('\n\n') + '\n');
+        s.vaultTranscript = tp; lastSync['t' + s.id] = s.segments.length;
+      }
+      body += `\n\n---\n🎙️ Transkript: [[${Vault.stem(tp)}]]`;
+    }
+    const full = `${front}# ${s.title || 'Mitschrift'}\n\n${body.trim()}\n${tasks ? `\n## 📌 Aufgaben & Termine\n${tasks}\n` : ''}`;
+    if (lastSync[s.id] === full && s.vaultPath === target) return;
+    await Vault.write(target, full);
+    const stt = await API.stat(target);
+    s.vaultPath = target; s.vaultMtime = stt.mtime; lastSync[s.id] = full;
+    await Sessions.put(s);
+  }
 
   // ============ Verbrauch mitzählen ============
   Claude.onUsage = (u) => {
@@ -181,6 +257,10 @@
   function route() {
     const h = location.hash.replace(/^#\/?/, '');
     const [name, id] = h.split('/');
+    document.body.classList.toggle('in-notes', name === 'notes');
+    $$('.nav-notes').forEach(a => a.classList.toggle('on', name === 'notes'));
+    if (name === 'notes' && window.Vault && Vault.available) { setTopMid(livePill()); return Vault.show(safeDecode(h.slice(6))); }
+    if (window.Vault && Vault.available && Vault.V.active) { Vault.V.active = null; Vault.renderSidebar(); }
     if (st.live && st.live.recording && !(name === 'stunde' && st.session && id === st.session.id)) {
       // Aufnahme läuft weiter im Hintergrund – kein Abbruch beim Navigieren
     }
@@ -599,7 +679,7 @@
   }
   function renderTranscript(s) {
     const el = $('#transcript'); if (!el) return;
-    if (!window.LiveTranscriber.supported()) {
+    if (!window.LiveTranscriber.supported() && !window.AudioContext) {
       el.innerHTML = `<div class="notice">Dieser Browser kann keine Live-Spracherkennung. Öffne AutoDoku in <b>Chrome</b> oder <b>Edge</b> (am Handy: Chrome). Notizen tippen, Text einfügen und Fotos gehen trotzdem.</div>`;
     } else el.innerHTML = '';
     el.insertAdjacentHTML('beforeend', s.segments.length ? s.segments.map(segHtml).join('') : '<p class="empty small" id="tr-empty">Hier erscheint live, was gesagt wird.</p>');
@@ -791,7 +871,6 @@
   async function startRecording() {
     const s = st.session;
     if (!s || s.kind !== 'lesson') return;
-    if (!window.LiveTranscriber.supported()) { toast('Live-Spracherkennung geht nur in Chrome/Edge. Notizen & Fotos funktionieren trotzdem.', 'warn', 6000); return; }
     const sub = Subjects.get(s.subjectId);
     if (s.finalNotes != null) {
       // nach "Fertig" weitermachen: polierte Version wird Basis für weitere Live-Updates
@@ -802,19 +881,32 @@
       recording: true, startedAt: Date.now(), lastUpdateAt: Date.now(), busy: false, errors: 0, sid: s.id,
       transcriber: null, wakeLock: null, tick: null, interim: '',
     };
-    L.transcriber = new LiveTranscriber({
-      onFinal: (text) => {
-        const x = { t: curRecMs(s), text, kind: 'speech' };
+    const recBase = s.durationMs || 0;
+    const handlers = {
+      onFinal: (text, meta) => {
+        // Zeitpunkt, an dem es GESAGT wurde (Abschnitte werden erst Sekunden später fertig erkannt)
+        const t = meta && meta.at ? recBase + Math.max(0, meta.at - L.startedAt) : curRecMs(s);
+        const x = { t, text, kind: 'speech' };
         s.segments.push(x);
         save(s);
         if (st.session === s) appendSeg(x);
       },
+      onLevel: (rms, thr, speaking) => { L.level = Math.max(rms, (L.level || 0) * 0.8); L.thr = thr; if (speaking) L.lastSpeechAt = Date.now(); },
+      onBacklog: (n) => { L.backlog = n; },
       onInterim: (text) => { L.interim = text; const el = $('#interim'); if (el && st.session === s) { el.textContent = text; if (text) scrollTranscript(true); } },
       onState: () => renderLiveInfo(),
       onError: (msg, fatal) => { toast(esc(msg), fatal ? 'err' : 'warn', fatal ? 9000 : 6000); if (fatal) stopRecording(); },
-      onNeedLocal: (info) => offerLocalSpeech(L, info),
-    });
-    L.transcriber.start(sub.speechLang || 'de-AT');
+      onFallback: () => {
+        // Google-Spracherkennung blockiert -> ab jetzt Whisper (lokal) bzw. Gemini-Audio
+        try { localStorage.setItem('autodoku.webSpeechBroken', String(Date.now())); } catch (e) { /* egal */ }
+        const eng = Settings.get().groqKey ? 'groq' : Settings.get().geminiKey ? 'gemini' : 'whisper';
+        toast(eng === 'whisper' ? '🔒 Google-Spracherkennung blockiert (Schul-WLAN) → nehme Offline-Spracherkennung im Browser.' : eng === 'groq' ? '⚡ Google-Spracherkennung blockiert → nehme Whisper (Groq).' : '🔷 Google-Spracherkennung blockiert → nehme Gemini-Audio.', 'warn', 8000);
+        if (L.recording) { L.transcriber = new ChunkTranscriber(handlers, eng); L.transcriber.start(speechLangFor(L.transcriber, sub), recOpts(sub, s)); }
+      },
+    };
+    L.lastSpeechAt = Date.now();
+    L.transcriber = makeTranscriber(handlers);
+    L.transcriber.start(speechLangFor(L.transcriber, sub), recOpts(sub, s));
     s.status = 'live';
     save(s);
     L.tick = setInterval(() => tick(s), 1000);
@@ -858,6 +950,46 @@
     });
   }
 
+  // Mikrofon + Hinweise (Fach, Fachbegriffe, zuletzt Gesagtes) für die Abschnitts-Erkennung
+  function recOpts(sub, s) {
+    const set = Settings.get();
+    const last = (s.segments || []).filter(x => x.kind === 'speech').slice(-3).map(x => x.text).join(' ').slice(-200);
+    return { micId: set.micId || '', hint: { subject: sub.name, glossary: [sub.glossary, set.glossary].filter(Boolean).join(', '), context: last } };
+  }
+
+  // Whisper/Gemini erkennen die Sprache selbst (Deutsch mit englischen Fachbegriffen) – Google braucht eine feste Sprache
+  function speechLangFor(t, sub) {
+    const set = Settings.get();
+    if (t instanceof ChunkTranscriber && set.speechLang === 'auto' &&!/^en/.test(sub.speechLang || '')) return 'auto';
+    return sub.speechLang || 'de-AT';
+  }
+
+  function makeTranscriber(handlers) {
+    const set = Settings.get();
+    let eng = set.speechEngine || 'auto';
+    if (eng === 'auto') {
+      // Am genauesten und leicht für den Laptop: Whisper large-v3 bei Groq, sonst Gemini-Audio.
+      // Nur ohne Schlüssel: Google (Browser) bzw. Offline-Whisper (schwer für schwache Laptops).
+      const broken = +(localStorage.getItem('autodoku.webSpeechBroken') || 0);
+      const desktop = /Electron/i.test(navigator.userAgent); // Desktop-App: Google-Spracherkennung gibt es dort nicht
+      if (Whisper.localState.installed) eng = 'local';
+      else if (set.groqKey) eng = 'groq';
+      else if (set.geminiKey) eng = 'gemini';
+      else eng = (desktop || !LiveTranscriber.supported() || Date.now() - broken < 6 * 3600e3) ? 'whisper' : 'google';
+    }
+    if (eng === 'local' && !Whisper.localState.installed) {
+      toast('🖥️ Lokale Spracherkennung ist noch nicht eingerichtet – ⚙️ → Spracherkennung → „Einrichten“.', 'warn', 9000);
+      eng = set.groqKey ? 'groq' : set.geminiKey ? 'gemini' : 'whisper';
+    }
+    if (eng === 'groq' && !set.groqKey) eng = set.geminiKey ? 'gemini' : 'whisper';
+    if (eng === 'gemini' && !set.geminiKey) eng = set.groqKey ? 'groq' : 'whisper';
+    if (eng === 'whisper' && !localStorage.getItem('autodoku.whisperWarned')) {
+      try { localStorage.setItem('autodoku.whisperWarned', '1'); } catch (e) { /* egal */ }
+      toast(Whisper.isDesktop() ? '💡 Die Browser-Erkennung ist schwer und ungenau. Besser: ⚙️ → Spracherkennung → „Lokal (whisper.cpp)“ einrichten.' : '💡 Die Offline-Erkennung braucht viel Leistung und ist ungenauer. Besser & leiser: gratis Groq-Schlüssel in ⚙️ → Spracherkennung.', 'warn', 10000);
+    }
+    return eng === 'google' ? new LiveTranscriber(handlers) : new ChunkTranscriber(handlers, eng);
+  }
+
   function stopRecording(noFlush) {
     const L = st.live; if (!L || !L.recording) return;
     const s = st.session;
@@ -872,8 +1004,12 @@
     releaseWakeLock();
     renderRecBtn(); renderLiveInfo();
     setTopMid('');
-    // Rest noch einarbeiten
-    if (!noFlush && s && s.cursor < s.segments.length && AI.ready() && Settings.get().liveUpdates) liveUpdate(s, true);
+    // Die letzten Sekunden werden evtl. noch erkannt -> danach den Rest einarbeiten
+    const t = L.transcriber;
+    L.flushing = t && t.whenIdle ? t.whenIdle(120000 + (t.backlog || 0) * 40000).then(() => { L.flushing = null; L.backlog = 0; renderLiveInfo(); }) : null;
+    Promise.resolve(L.flushing).then(() => {
+      if (!noFlush && s && s.cursor < s.segments.length && AI.ready() && Settings.get().liveUpdates && !st.finalizing && !st.preparing) liveUpdate(s, true);
+    });
   }
 
   function tick(s) {
@@ -881,7 +1017,7 @@
     renderLiveInfo();
     const pill = $('#rec-pill-time'); if (pill) pill.textContent = mmss(curRecMs(s));
     const set = Settings.get();
-    if (!AI.ready() || !set.liveUpdates || L.busy || st.editing) return;
+    if (!AI.ready() || !set.liveUpdates || L.busy || st.editing || st.preparing) return;
     const since = (Date.now() - L.lastUpdateAt) / 1000;
     const backoff = Math.min(300, set.interval * Math.pow(2, L.errors));
     if (since < (L.errors ? backoff : set.interval)) return;
@@ -907,22 +1043,36 @@
     const L = st.live;
     const set = Settings.get();
     if (!s || s.kind !== 'lesson') { el.innerHTML = s && s.kind === 'study' ? '<span class="li-chip">📚 Lernzettel</span>' + costChip(s) : ''; return; }
-    if (st.finalizing) { el.innerHTML = '<span class="li-chip busy"><span class="spin"></span> Claude poliert die Mitschrift …</span>'; return; }
+    if (st.finalizing || st.preparing) { el.innerHTML = `<span class="li-chip busy"><span class="spin"></span> ${esc(st.finalizeStage || 'poliert die Mitschrift …')}</span>`; return; }
     if (L && L.recording) {
       const pending = words(s.segments.slice(s.cursor).map(x => x.text).join(' '));
       const rest = Math.max(0, Math.round(set.interval - (Date.now() - L.lastUpdateAt) / 1000));
-      const state = L.transcriber && L.transcriber.state === 'restarting' ? 'hört gleich wieder zu' : 'hört zu';
+      const state = L.transcriber && L.transcriber.state === 'restarting' ? 'hört gleich wieder zu' : L.transcriber && L.transcriber.state === 'loading' ? 'nimmt auf, lädt Erkennung' : 'hört zu';
       el.innerHTML = `<span class="li-chip rec"><span class="dot rec"></span>${mmss(curRecMs(s))} · ${state}</span>` +
-        (L.transcriber && L.transcriber.local ? '<span class="li-chip ok" title="Spracherkennung läuft offline im Chrome">🔒 offline</span>' : '') +
+        levelChip(L) +
+        (L.transcriber && L.transcriber.local ? '<span class="li-chip ok" title="Spracherkennung läuft offline auf deinem Laptop">🔒 offline</span>' : '') +
+        (L.backlog > 2 ? `<span class="li-chip warn" title="So viele Abschnitte warten noch auf die Spracherkennung. Es geht nichts verloren, der Text kommt nur später.">⏳ ${L.backlog} in Arbeit</span>` : '') +
         (!AI.ready() ? `<span class="li-chip warn" title="${esc(AI.why())}">nur Transkript</span>`
           : L.busy ? '<span class="li-chip busy"><span class="spin"></span> schreibt mit …</span>'
             : !set.liveUpdates ? '<span class="li-chip" title="Sparstufe „Nur am Ende“">🪙 Zusammenfassung bei „Fertig“</span>'
               : `<span class="li-chip">${pending < set.minWords ? `${pending}/${set.minWords} Wörter` : `Update in ${rest}s`}</span>`) + costChip(s);
+    } else if (L && L.flushing && L.sid === s.id) {
+      el.innerHTML = '<span class="li-chip busy"><span class="spin"></span> erkennt die letzten Sekunden …</span>';
     } else if (L && L.busy) {
       el.innerHTML = '<span class="li-chip busy"><span class="spin"></span> schreibt mit …</span>';
     } else {
       el.innerHTML = (s.status === 'final' ? '<span class="li-chip ok">✓ fertig poliert</span>' : s.segments.length ? `<span class="li-chip">⏸ pausiert · ${fmtDur(s.durationMs)}</span>` : '<span class="li-chip">bereit</span>') + costChip(s);
     }
+  }
+
+  // Mikrofon-Pegel: zeigt, ob der Lehrer überhaupt ankommt
+  function levelChip(L) {
+    if (L.level == null) return '';
+    const pct = Math.max(4, Math.min(100, Math.round(Math.sqrt(L.level / 0.12) * 100)));
+    const silentFor = (Date.now() - (L.lastSpeechAt || Date.now())) / 1000;
+    const warn = silentFor > 90;
+    if (warn && !L.quietWarned) { L.quietWarned = true; toast('🎤 Seit über einer Minute kommt kaum etwas am Mikrofon an. Falls gerade gesprochen wird: Laptop näher zum Lehrer legen oder in ⚙️ ein anderes Mikrofon wählen.', 'warn', 9000); }
+    return `<span class="li-chip level${warn ? ' warn' : ''}" title="${warn ? 'Sehr leise – kommt der Lehrer an?' : 'Mikrofon-Pegel'}"><span class="lvl"><i style="width:${pct}%"></i></span>${warn ? ' leise' : ''}</span>`;
   }
 
   function costChip(s) {
@@ -939,7 +1089,7 @@
     if (document.visibilityState === 'visible' && st.live && st.live.recording) {
       if (Settings.get().keepAwake) requestWakeLock();
       const t = st.live.transcriber;
-      if (t && t.state !== 'listening') { try { t._spawn(); } catch (e) { /* läuft schon */ } }
+      if (t && t._spawn && !/^listening/.test(t.state || '')) { try { t._spawn(); } catch (e) { /* läuft schon */ } }
     }
   });
   window.addEventListener('beforeunload', (e) => { if (st.live && st.live.recording) { e.preventDefault(); e.returnValue = ''; } });
@@ -951,126 +1101,320 @@
     if (L.busy || st.finalizing) return;
     if (st.editing) { if (force) toast('Erst Bearbeiten speichern'); return; }
     if (!AI.ready()) { if (force) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); } return; }
-    const pending = s.segments.slice(s.cursor);
-    if (!pending.length) { if (force) toast('Seit dem letzten Update wurde nichts Neues gesagt.'); return; }
-    const upto = s.segments.length;
+    if (s.cursor >= s.segments.length) { if (force) toast('Seit dem letzten Update wurde nichts Neues gesagt.'); return; }
     const sub = Subjects.get(s.subjectId);
+    const system = Prompts.live(sub, set);
+    // Nur so viel neues Transkript, wie die KI auf einmal verarbeiten kann – der Rest kommt im nächsten Durchgang.
+    // (Früher wurde zu langer Text vorne abgeschnitten und war dann für die Live-Mitschrift verloren.)
+    const pack = () => {
+      const budget = AI.budget('live', system.length);
+      let last = s.sections[s.sections.length - 1] || '';
+      const outline = s.sections.map((m, i) => `${i + 1}. ${firstLine(m)}`).join('\n').slice(-Math.floor(budget * 0.15));
+      // letzter Abschnitt zu groß fürs Modell -> nicht mitschicken, dann darf die KI nur anhängen
+      const noLast = last.length > budget * 0.4;
+      if (noLast) last = '(zu lang zum Mitschicken – NICHT ersetzen, neue Inhalte nur mit <append> anhängen)';
+      const room = Math.max(800, budget - last.length - outline.length - 1500);
+      let end = s.cursor, chars = 0;
+      while (end < s.segments.length && (end === s.cursor || chars + s.segments[end].text.length + 30 <= room)) { chars += s.segments[end].text.length + 30; end++; }
+      return { end, last, outline, noLast };
+    };
+    const { end: upto, last, outline, noLast } = pack();
+    const pending = s.segments.slice(s.cursor, upto);
     const segment = pending.map(x => (x.kind === 'note' ? `[Notiz vom Schüler: ${x.text}]` : x.text)).join(' ');
     const context = s.segments.slice(Math.max(0, s.cursor - 30), s.cursor).map(x => x.text).join(' ').slice(-700);
     L.busy = true; renderLiveInfo();
+    let more = false;
     try {
       const r = await Claude.withRetry(() => AI.call({
         apiKey: set.apiKey, model: set.modelLive, tier: 'live', maxTokens: 3500, temperature: 0.2, tag: s.id,
-        system: Prompts.live(sub, set),
+        system,
         messages: [{
           role: 'user', content: Prompts.liveUser({
-            outline: s.sections.map((m, i) => `${i + 1}. ${firstLine(m)}`).join('\n'),
-            last: s.sections[s.sections.length - 1] || '',
+            outline, last,
             tasks: (s.tasks || []).map(t => `${t.text}${t.due ? ' (' + t.due + ')' : ''}`).join('; '),
             context, segment, title: s.title,
           }),
         }],
       }));
-      applyLive(s, r.text);
+      const ok = applyLive(s, r.text, { noLast });
+      // Antwort ohne erkennbares Format bei viel neuem Stoff -> Text nicht als "erledigt" markieren
+      if (!ok && words(segment) > 60 && !L.badReply) { L.badReply = true; throw new Error('Die KI hat unbrauchbar geantwortet – nächster Versuch gleich.'); }
+      // zweimal unbrauchbar -> wenigstens den Wortlaut als Notiz behalten statt ihn zu verlieren
+      if (!ok && words(segment) > 3) s.sections.push('## Notizen (nicht zusammengefasst)\n' + pending.map(x => '- ' + (x.kind === 'note' ? '**Notiz:** ' : '') + x.text).join('\n'));
+      L.badReply = false;
       s.cursor = upto;
       L.errors = 0;
+      more = upto < s.segments.length;
       save(s);
       if (st.session === s) { renderNotes(s); renderTasks(s); const t = $('#title'); if (t && document.activeElement !== t) t.value = s.title; }
     } catch (e) {
       L.errors = (L.errors || 0) + 1;
-      toast('Update fehlgeschlagen: ' + esc(e.message), 'err', 6000);
+      if (!L.silent) toast('Update fehlgeschlagen: ' + esc(e.message), 'err', 6000);
       if (e.type === 'no_key' || e.status === 401) L.errors = 6;
+      L.lastError = e;
     } finally {
       L.busy = false;
       L.lastUpdateAt = Date.now();
       renderLiveInfo();
     }
+    // Rückstand (z. B. nach Verbindungsproblemen) gleich weiter abarbeiten
+    if (more && force && !L.errors) return liveUpdate(s, true);
+    return !L.errors;
   }
 
-  function applyLive(s, text) {
+  // Alles Gesagte in die Live-Mitschrift einarbeiten (vor „Fertig“, auch bei Sparstufe „Nur am Ende“)
+  async function catchUp(s, onStep) {
+    const L = st.live || (st.live = { recording: false, busy: false, errors: 0, lastUpdateAt: Date.now() });
+    for (let i = 0; i < 25 && L.busy; i++) await new Promise(r => setTimeout(r, 500));
+    let fails = 0, guard = 0;
+    while (s.cursor < s.segments.length && fails < 3 && guard++ < 400) {
+      onStep && onStep(s.cursor, s.segments.length);
+      for (let i = 0; i < 120 && L.busy; i++) await new Promise(r => setTimeout(r, 500));
+      L.silent = true;
+      const before = s.cursor;
+      try { await liveUpdate(s, false); } finally { L.silent = false; }
+      if (s.cursor === before) { fails++; await new Promise(r => setTimeout(r, 2500 * fails)); } else fails = 0;
+    }
+    L.errors = 0;
+    return s.cursor >= s.segments.length;
+  }
+
+  function applyLive(s, text, opts) {
     const title = Claude.tag(text, 'title');
     if (title && !s.titleLocked && !/^\(|^leer$/i.test(title)) s.title = title.replace(/^#+\s*/, '').slice(0, 90);
-    const rep = Claude.tag(text, 'replace_last');
-    const app = Claude.tag(text, 'append');
+    let rep = Claude.tag(text, 'replace_last');
+    let app = Claude.tag(text, 'append');
+    // KI kannte den letzten Abschnitt nicht -> "Ersetzen" wäre Verlust, also anhängen
+    if (opts && opts.noLast && rep) { app = [rep, app].filter(Boolean).join('\n\n'); rep = ''; }
+    // kleine lokale Modelle vergessen manchmal die Tags -> Markdown trotzdem übernehmen
+    const tagged = /<(title|tasks|replace_last|append)>/.test(text);
+    if (!rep && !app && !tagged && /^(##\s|[-*] |> )/m.test(text)) app = /^##\s/m.test(text) ? text.trim() : '## Notizen\n' + text.trim();
+    let changed = false;
     if (rep && rep.length > 8 && !/^\(?leer\)?$/i.test(rep)) {
       const old = s.sections[s.sections.length - 1] || '';
       let neu = rep;
+      const plain = (m) => m.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+      if (old && plain(neu).length < plain(old).length * 0.6 && plain(old).length > 300) {
+        // KI hat statt der kompletten neuen Fassung nur das Neue geliefert -> Altes behalten, Neues anhängen
+        const oldHead = firstLine(old).trim(), lines = neu.split('\n');
+        if (lines[0].trim() === oldHead) lines.shift();
+        neu = old.replace(/\s+$/, '') + '\n\n' + lines.join('\n').trim();
+      }
       // Bilder aus dem alten Abschnitt nie verlieren
       const imgs = old.match(/!\[[^\]]*\]\(img:[^)]+\)/g) || [];
       imgs.forEach(ref => { if (!neu.includes(ref.replace(/^!\[[^\]]*\]/, ''))) neu += '\n\n' + ref; });
       if (s.sections.length) s.sections[s.sections.length - 1] = neu; else s.sections.push(neu);
+      changed = true;
     }
-    if (app && app.length > 8 && !/^\(?leer\)?$/i.test(app)) s.sections.push(...splitSections(app));
+    if (app && app.length > 8 && !/^\(?leer\)?$/i.test(app)) {
+      const add = splitSections(app);
+      // gleiche Überschrift wie der letzte Abschnitt -> anhängen statt doppelte Überschrift
+      const lastHead = s.sections.length ? firstLine(s.sections[s.sections.length - 1]).trim() : null;
+      if (add.length && lastHead && firstLine(add[0]).trim() === lastHead) {
+        s.sections[s.sections.length - 1] += '\n\n' + add.shift().split('\n').slice(1).join('\n').trim();
+      }
+      s.sections.push(...add);
+      changed = true;
+    }
     const tasks = parseTasks(Claude.tag(text, 'tasks'));
     if (tasks.length) {
       const before = (s.tasks || []).length;
       mergeTasks(s, tasks);
       if (s.tasks.length > before) toast(`📌 Neu eingetragen: ${esc(s.tasks[s.tasks.length - 1].text)}`, 'ok', 5000);
     }
+    // gültig = etwas übernommen ODER die KI hat bewusst im richtigen Format "nichts Neues" geantwortet
+    return changed || tagged || tasks.length > 0;
   }
 
   // ============ Claude: Fertig & polieren ============
+  // Zwei Wege:
+  //  "voll"   – große KI (Claude, Gemini …): komplettes Transkript + Live-Mitschrift -> neu geordnete Mitschrift
+  //  "sicher" – kleine/lokale KI (Ollama, Chrome-KI) oder zu langer Stoff: erst alles in die Live-Mitschrift
+  //             einarbeiten, die Mitschrift BEHALTEN und nur Zusammenfassung, Begriffe und Testfragen ergänzen.
+  //             So kann ein kleines Modell mit wenig Kontext nichts mehr "wegpolieren".
+  const plainLen = (md) => String(md || '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/[#>*_=`|-]/g, '').replace(/\s+/g, ' ').trim().length;
+
+  function mergeSameHeadings(sections) {
+    const out = [], byHead = new Map();
+    for (const sec of sections) {
+      const h = firstLine(sec).trim();
+      if (/^##\s/.test(h) && byHead.has(h.toLowerCase())) {
+        const i = byHead.get(h.toLowerCase());
+        out[i] = out[i].replace(/\s+$/, '') + '\n\n' + sec.split('\n').slice(1).join('\n').trim();
+      } else { if (/^##\s/.test(h)) byHead.set(h.toLowerCase(), out.length); out.push(sec); }
+    }
+    return out;
+  }
+
+  // schon einmal poliert (evtl. selbst bearbeitet): als Basis nehmen, aber alte Zusammenfassung/Begriffe/Testfragen
+  // entfernen, sonst kommen sie doppelt
+  function unpolish(s) {
+    if (s.finalNotes == null) return;
+    s.sections = splitSections(s.finalNotes.replace(/^> \[!ZUSAMMENFASSUNG\][^\n]*\n(> [^\n]*\n?)*/, ''))
+      .filter(x => !/^##\s+(Begriffe|Teste dich selbst)\s*$/i.test(firstLine(x).trim()));
+    s.finalNotes = null;
+  }
+
+  function setStage(txt) { st.finalizeStage = txt; renderLiveInfo(); }
+
   async function finalize(s) {
     const set = Settings.get();
-    if (st.finalizing) return;
+    if (st.finalizing || st.preparing) return;
     if (!AI.ready()) { toast(esc(AI.why() || 'Keine KI eingerichtet.'), 'warn', 6000); openSettings(); return; }
     if (!s.segments.length && !Object.keys(s.images).length) { toast('Noch nichts aufgenommen.'); return; }
     if (st.editing) toggleEdit(s);
     if (st.live && st.live.recording && st.session === s) stopRecording(true);
-    // auf laufendes Live-Update warten
-    for (let i = 0; i < 60 && st.live && st.live.busy; i++) await new Promise(r => setTimeout(r, 500));
     const sub = Subjects.get(s.subjectId);
-    st.finalizing = true; renderLiveInfo();
-    if (isMobile()) setMTab('notes');
+    st.preparing = true;
+    try {
+      // 1) letzte Sekunden fertig erkennen lassen (sonst fehlt oft genau die Hausübung am Stundenende)
+      if (st.live && st.live.flushing) { setStage('erkennt die letzten Sekunden …'); await st.live.flushing; }
+      for (let i = 0; i < 60 && st.live && st.live.busy; i++) await new Promise(r => setTimeout(r, 500));
+      // 2) Weg wählen
+      const transcriptLen = s.segments.reduce((n, x) => n + x.text.length + 12, 0);
+      const fullFits = transcriptLen < 180000 && transcriptLen + plainLen(notesMd(s)) * 1.3 + 2000 < AI.budget('final', 9000);
+      let mode = !AI.smallModel() && fullFits ? 'voll' : 'sicher';
+      if (mode === 'sicher') unpolish(s);
+      if (mode === 'sicher' && s.cursor < s.segments.length) {
+        setStage('arbeitet das Gesagte in die Mitschrift ein …');
+        await catchUp(s, (a, b) => setStage(`arbeitet das Gesagte ein … ${Math.round(a / Math.max(1, b) * 100)} %`));
+        if (st.session === s) renderNotes(s);
+      }
+      st.preparing = false;
+      st.finalizing = true; setStage('');
+      if (isMobile()) setMTab('notes');
+      let res = null;
+      if (mode === 'voll') {
+        res = await finalizeFull(s, sub, set);
+        if (res && res.fallback) {
+          toast(esc(res.fallback) + ' Ich behalte deshalb die Live-Mitschrift und ergänze nur Zusammenfassung & Testfragen.', 'warn', 9000);
+          mode = 'sicher';
+          unpolish(s);
+          st.finalizing = false; st.preparing = true;
+          setStage('arbeitet das Gesagte in die Mitschrift ein …');
+          await catchUp(s);
+          st.preparing = false; st.finalizing = true;
+          res = null;
+        }
+      }
+      if (mode === 'sicher') res = await finalizeSafe(s, sub, set);
+      if (!res) return;
+      const title = res.title;
+      if (title && !s.titleLocked && !/^\(|^leer$/i.test(title)) s.title = title.replace(/^#+\s*/, '').slice(0, 90);
+      s.liveNotesBackup = notesMd(s);
+      s.finalNotes = res.notes;
+      mergeTasks(s, parseTasks(res.tasks));
+      s.status = 'final';
+      s.cursor = s.segments.length;
+      await saveNow(s);
+      // Fachbegriffe -> eigene Notizen im Ordner "Begriffe"
+      if (res.terms && vaultOn() && set.termNotes) {
+        try { await syncToVault(s); const n = await Rules.writeTerms(res.terms, { subject: sub.name, source: s.vaultPath }); if (n) toast(`📚 ${n} neue Begriff${n > 1 ? 'e' : ''} im Ordner „${esc(set.termFolder || 'Begriffe')}“`, 'ok', 5000); }
+        catch (e) { console.warn('Begriffe', e); }
+      }
+      toast('✨ Fertig! Jetzt als Word exportieren.', 'ok');
+    } catch (e) {
+      toast('Polieren fehlgeschlagen: ' + esc(e.message) + ' – die Live-Mitschrift bleibt erhalten.', 'err', 8000);
+    } finally {
+      st.preparing = false; st.finalizing = false; st.finalizeStage = '';
+      const paper = $('#paper'); if (paper) paper.classList.remove('streaming');
+      if (st.session === s) { const t = $('#title'); if (t) t.value = s.title; renderNotes(s); renderTasks(s); renderLiveInfo(); }
+    }
+    if (s.status === 'final' && set.suggestImages) autoResolveSuggestions(s);
+  }
+
+  // Großes Modell: alles neu ordnen. Gibt {fallback: Grund} zurück, wenn das Ergebnis Inhalt verlieren würde.
+  async function finalizeFull(s, sub, set) {
     const paper = $('#paper');
     const backup = notesMd(s);
     let lastRender = 0;
     const transcript = s.segments.map(x => `[${mmss(x.t)}] ${x.kind === 'note' ? '(Notiz vom Schüler) ' : ''}${x.text}`).join('\n');
     const images = Object.entries(s.images).filter(([, im]) => im.kind === 'board').map(([id, im]) => `img:${id} = ${im.caption}`).join('; ');
-    paper.classList.add('streaming');
-    try {
-      const r = await Claude.withRetry(() => AI.stream({
-        apiKey: set.apiKey, model: set.modelFinal, tier: 'final', maxTokens: 16000, temperature: 0.3, tag: s.id,
-        system: Prompts.final(sub, set),
-        messages: [{
-          role: 'user', content: Prompts.finalUser({
-            transcript: transcript.slice(-180000), notes: backup,
-            tasks: (s.tasks || []).map(t => `${t.text}${t.due ? ' (' + t.due + ')' : ''}`).join('; '),
-            images, title: s.title,
-          }),
-        }],
-        onText: (txt) => {
-          const now = Date.now();
-          if (now - lastRender < 300) return;
-          lastRender = now;
-          const partial = Claude.tag(txt, 'notes');
-          if (partial && st.session === s && $('#paper')) {
-            $('#paper').innerHTML = `<header class="paper-head"><span class="ph-sub">${esc(sub.emoji)} ${esc(sub.name.toUpperCase())}</span><span class="ph-date">✨ wird poliert …</span></header>
-              <h1 class="paper-title">${esc(Claude.tag(txt, 'title') || s.title || 'Mitschrift')}</h1>${MD.toHtml(MD.parse(partial), { resolveImage: (src) => resolveImage(s, src) })}<div class="paper-cursor"></div>`;
-            const p = $('#paper'); p.scrollTop = p.scrollHeight;
-          }
-        },
-      }));
-      const notes = Claude.tag(r.text, 'notes');
-      if (!notes || notes.length < 40) throw new Error('Antwort unvollständig');
-      const title = Claude.tag(r.text, 'title');
-      if (title && !s.titleLocked) s.title = title.replace(/^#+\s*/, '').slice(0, 90);
-      s.finalNotes = notes;
-      s.liveNotesBackup = backup;
-      mergeTasks(s, parseTasks(Claude.tag(r.text, 'tasks')));
-      s.status = 'final';
-      s.cursor = s.segments.length;
-      await saveNow(s);
-      if (r.stop === 'max_tokens') toast('Die Mitschrift war sehr lang und wurde am Ende abgeschnitten.', 'warn', 7000);
-      toast('✨ Fertig! Jetzt als Word exportieren.', 'ok');
-    } catch (e) {
-      toast('Polieren fehlgeschlagen: ' + esc(e.message) + ' – die Live-Mitschrift bleibt erhalten.', 'err', 8000);
-    } finally {
-      st.finalizing = false;
-      paper.classList.remove('streaming');
-      if (st.session === s) { const t = $('#title'); if (t) t.value = s.title; renderNotes(s); renderTasks(s); renderLiveInfo(); }
+    if (paper) paper.classList.add('streaming');
+    const r = await Claude.withRetry(() => AI.stream({
+      apiKey: set.apiKey, model: set.modelFinal, tier: 'final', maxTokens: 16000, temperature: 0.3, tag: s.id,
+      system: Prompts.final(sub, Object.assign({}, set, { _terms: vaultOn() && set.termNotes })),
+      messages: [{
+        role: 'user', content: Prompts.finalUser({
+          transcript: transcript.slice(-180000), notes: backup,
+          tasks: (s.tasks || []).map(t => `${t.text}${t.due ? ' (' + t.due + ')' : ''}`).join('; '),
+          images, title: s.title,
+        }),
+      }],
+      onText: (txt) => {
+        const now = Date.now();
+        if (now - lastRender < 300) return;
+        lastRender = now;
+        const partial = Claude.tag(txt, 'notes');
+        if (partial && st.session === s && $('#paper')) {
+          $('#paper').innerHTML = `<header class="paper-head"><span class="ph-sub">${esc(sub.emoji)} ${esc(sub.name.toUpperCase())}</span><span class="ph-date">✨ wird poliert …</span></header>
+            <h1 class="paper-title">${esc(Claude.tag(txt, 'title') || s.title || 'Mitschrift')}</h1>${MD.toHtml(MD.parse(partial), { resolveImage: (src) => resolveImage(s, src) })}<div class="paper-cursor"></div>`;
+          const p = $('#paper'); p.scrollTop = p.scrollHeight;
+        }
+      },
+    }));
+    let notes = Claude.tag(r.text, 'notes');
+    if (!notes && /^(##|>)\s/m.test(r.text)) notes = r.text.replace(/<(title|tasks|terms)>[\s\S]*?(<\/\1>|$)/g, '').trim();
+    if (!notes || notes.length < 40) return { fallback: 'Die KI-Antwort war unvollständig.' };
+    if (r.stop === 'max_tokens') return { fallback: 'Die polierte Fassung wurde zu lang und wäre abgeschnitten worden.' };
+    // Sicherheitsnetz: polierte Fassung deutlich kürzer als die Live-Mitschrift -> da fehlt Stoff
+    const liveLen = plainLen(backup);
+    if (liveLen > 1500 && plainLen(notes) < liveLen * 0.6) return { fallback: 'Die polierte Fassung war deutlich kürzer als die Live-Mitschrift.' };
+    // Bilder der Stunde dürfen nie verloren gehen
+    Object.entries(s.images).filter(([, im]) => im.kind === 'board').forEach(([id, im]) => {
+      if (!notes.includes('img:' + id)) notes += `\n\n![${im.caption || 'Tafelbild'}](img:${id})`;
+    });
+    return { notes, title: Claude.tag(r.text, 'title'), tasks: Claude.tag(r.text, 'tasks'), terms: Claude.tag(r.text, 'terms') };
+  }
+
+  // Kleine KI: Live-Mitschrift bleibt der Kern, die KI ergänzt nur Zusammenfassung, Begriffe und Testfragen
+  async function finalizeSafe(s, sub, set) {
+    setStage('schreibt Zusammenfassung & Testfragen …');
+    const sections = mergeSameHeadings((s.sections || []).filter(x => x.trim()));
+    // was die KI nicht mehr einarbeiten konnte, kommt wörtlich dazu – lieber roh als weg
+    const rest = s.segments.slice(s.cursor || 0);
+    if (rest.length && sections.length) sections.push('## Noch nicht eingearbeitet\n' + rest.map(x => `- [${mmss(x.t)}] ${x.kind === 'note' ? '**Notiz:** ' : ''}${x.text}`).join('\n'));
+    let body = sections.join('\n\n').trim();
+    if (!body) {
+      // nichts eingearbeitet (z. B. KI streikt) -> wenigstens das Transkript übernehmen
+      body = '## Transkript\n' + s.segments.map(x => `- [${mmss(x.t)}] ${x.kind === 'note' ? '**Notiz:** ' : ''}${x.text}`).join('\n');
     }
-    if (s.status === 'final' && set.suggestImages) autoResolveSuggestions(s);
+    const system = Prompts.extras(sub, Object.assign({}, set, { _terms: vaultOn() && set.termNotes }));
+    const room = AI.budget('final', system.length) - 800;
+    let given = body;
+    if (given.length > room) {
+      // zu lang fürs kleine Modell: Gliederung + so viel Text wie passt (Inhalt bleibt ja trotzdem in der Mitschrift)
+      const outline = sections.map(x => firstLine(x)).join('\n');
+      given = 'GLIEDERUNG:\n' + outline + '\n\nAUSZUG:\n' + body.slice(0, Math.max(1000, room - outline.length - 200));
+    }
+    let r = null;
+    try {
+      r = await Claude.withRetry(() => AI.call({
+        apiKey: set.apiKey, model: set.modelFinal, tier: 'final', maxTokens: 2500, temperature: 0.3, tag: s.id,
+        system,
+        messages: [{ role: 'user', content: Prompts.extrasUser({ notes: given, title: s.title, tasks: (s.tasks || []).map(t => `${t.text}${t.due ? ' (' + t.due + ')' : ''}`).join('; ') }) }],
+      }));
+    } catch (e) {
+      toast('Zusammenfassung & Testfragen gingen nicht (' + esc(e.message) + ') – die Mitschrift ist trotzdem fertig.', 'warn', 7000);
+    }
+    const txt = (r && r.text) || '';
+    const bullets = (tag) => Claude.tag(txt, tag).split('\n').map(l => l.trim()).filter(Boolean);
+    const summary = bullets('summary').map(l => '> ' + (/^[-*]\s/.test(l) ? l : '- ' + l.replace(/^\d+[.)]\s*/, '')));
+    const glossary = bullets('glossary').filter(l => l.includes('|')).map(l => {
+      const [a, ...b] = l.replace(/^[-*]\s*|^\||\|$/g, '').split('|');
+      return `| ${a.trim()} | ${b.join(' ').trim()} |`;
+    }).filter(l => !/^\|\s*(begriff|term)\s*\|/i.test(l) && !/^\|\s*-+/.test(l));
+    const quiz = bullets('quiz').map((l, i) => `${i + 1}. ${l.replace(/^\d+[.)]\s*|^[-*]\s*/, '')}`);
+    const sol = bullets('solutions').map((l, i) => `> ${i + 1}. ${l.replace(/^\d+[.)]\s*|^[-*]\s*/, '')}`);
+    const parts = [];
+    if (summary.length) parts.push('> [!ZUSAMMENFASSUNG]\n' + summary.join('\n'));
+    parts.push(body);
+    if (glossary.length >= 2 && !/^##\s+Begriffe/im.test(body)) parts.push('## Begriffe\n| Begriff | Bedeutung |\n|---|---|\n' + glossary.join('\n'));
+    if (quiz.length) parts.push('## Teste dich selbst\n' + quiz.join('\n') + (sol.length ? '\n\n> [!TIPP] Lösungen\n' + sol.join('\n') : ''));
+    Object.entries(s.images).filter(([, im]) => im.kind === 'board').forEach(([id, im]) => {
+      if (!body.includes('img:' + id)) parts.push(`![${im.caption || 'Tafelbild'}](img:${id})`);
+    });
+    return { notes: parts.join('\n\n'), title: Claude.tag(txt, 'title'), tasks: Claude.tag(txt, 'tasks'), terms: Claude.tag(txt, 'terms') };
   }
 
   // ============ Claude: Fragen & Rettungsknopf ============
@@ -1252,7 +1596,7 @@
         title: s.title, subject: sub.name, author: set.studentName || 'AutoDoku',
       });
       const name = `${new Date(s.createdAt).toISOString().slice(0, 10)}_${slug(sub.name)}_${slug(s.title)}.docx`;
-      await deliver(blob, name);
+      await deliver(blob, name, s);
     } catch (e) {
       console.error(e);
       toast('Word-Export fehlgeschlagen: ' + esc(e.message), 'err');
@@ -1273,7 +1617,17 @@
     await deliver(blob, `${slug(sub.name)}_alle_Mitschriften.docx`);
   }
 
-  async function deliver(blob, name) {
+  async function deliver(blob, name, s) {
+    // Desktop mit Notizordner: Word-Datei neben die Notizen legen und öffnen
+    if (vaultOn()) {
+      const sub = s ? Subjects.get(s.subjectId) : null;
+      const folder = s && s.vaultPath ? Vault.dirName(s.vaultPath) : sub ? Vault.safeName(sub.name.replace(/\s*\/\s*/g, ' & ')) : '';
+      const p = Vault.uniquePath(Vault.join(folder, 'Word', name));
+      await Vault.write(p, new Uint8Array(await blob.arrayBuffer()));
+      window.vaultAPI.openExternal(p);
+      toast(`📄 Gespeichert im Notizordner: <b>${esc(p)}</b> – Word öffnet sich`, 'ok', 6000);
+      return;
+    }
     const file = typeof File !== 'undefined' ? new File([blob], name, { type: blob.type }) : null;
     // Handy: Teilen-Menü (OneDrive, Teams, WhatsApp …) anbieten
     if (file && isMobile() && navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1287,7 +1641,8 @@
       return;
     }
     download(blob, name);
-    toast(`📄 <b>${esc(name)}</b> heruntergeladen`, 'ok', 5000);
+    if (window.AUTODOKU_INFO && window.AUTODOKU_INFO.desktop) toast(`📄 Gespeichert in <b>Dokumente › AutoDoku</b> – Word öffnet sich gleich`, 'ok', 6000);
+    else toast(`📄 <b>${esc(name)}</b> heruntergeladen`, 'ok', 5000);
   }
 
   // ============ Einstellungen ============
@@ -1300,23 +1655,61 @@
       <div class="settings">
         <fieldset><legend>KI für die Zusammenfassungen</legend>
           <div class="modes prov">${[
-            ['auto', '⚡ Automatisch gratis', 'Chrome-KI, wenn dein Laptop sie kann – sonst Gemini (gratis Schlüssel)'],
-            ['chrome', '🖥️ Chrome-KI (lokal)', 'Läuft direkt auf deinem Laptop: gratis, ohne Schlüssel, ohne Internet. Braucht aktuelles Chrome & einen stärkeren PC.'],
+            ['claude', '🟠 Claude (empfohlen)', 'Beste Mitschriften, liest Tafelfotos & Formeln sehr genau. Eigener API-Schlüssel – ein paar Cent pro Stunde. Läuft in der Cloud, dein Laptop bleibt leise.'],
+            ['ollama', '🦙 Ollama (lokal, gratis)', 'KI läuft auf deinem PC: gratis, ohne Schlüssel, ohne Internet. AutoDoku installiert, startet und beendet Ollama selbst. Ab ca. 12 GB RAM empfohlen.'],
+            ['auto', '⚡ Automatisch', 'Claude, wenn ein Schlüssel eingetragen ist – sonst Gemini (gratis), sonst Ollama, sonst Chrome-KI'],
             ['gemini', '🔷 Google Gemini', 'Gratis-Kontingent mit kostenlosem Schlüssel (Google-Konto, 1 Minute). Kann Tafelfotos lesen.'],
-            ['claude', '🟠 Claude', 'Eigener Claude-API-Schlüssel – kostet ein paar Cent pro Stunde.'],
+            ['openai', '🔌 Eigene API', 'OpenAI, Groq, Mistral, OpenRouter, DeepSeek … – eigener Schlüssel, eigenes Modell.'],
+            ['chrome', '🖥️ Chrome-KI (lokal)', 'Nur in Google Chrome. Läuft auf dem Laptop – schwach und belastet den PC.'],
           ].map(([k, l, h]) => `<label class="mode ${(s.provider || 'auto') === k ? 'on' : ''}"><input type="radio" name="prov" value="${k}" ${(s.provider || 'auto') === k ? 'checked' : ''}><b>${l}</b><small>${h}</small></label>`).join('')}</div>
           <p class="spend" id="prov-status"></p>
-          <div class="prov-box" data-for="chrome auto"><button class="btn small" id="chrome-load" type="button">🖥️ Chrome-KI laden / prüfen</button></div>
+          <div class="prov-box ollama-box" data-for="ollama">
+            <p class="spend" id="ollama-status">… prüfe Ollama</p>
+            <div class="row wrap">
+              <button class="btn small" id="ollama-install" type="button" style="display:none">⬇ Ollama einrichten (≈ 40 MB)</button>
+              <select class="input" id="set-omodel" style="max-width:300px"></select>
+              <button class="btn small" id="ollama-pull" type="button">⬇ Modell laden</button>
+              <a class="btn small ghost" href="https://ollama.com/download" target="_blank" rel="noopener" id="ollama-dl" style="display:none">Ollama herunterladen</a>
+            </div>
+            <div class="quiz-progress" id="ollama-bar" style="display:none;margin-top:8px"><span style="width:0%"></span></div>
+            ${Setup.isDesktop() ? `<label class="check"><input type="checkbox" id="ollama-quit"> Ollama beim Beenden von AutoDoku schließen (gibt Arbeitsspeicher frei)</label>
+            <button class="btn small ghost" id="ollama-noauto" type="button" style="display:none">Ollama-Autostart von Windows ausschalten</button>
+            <small>Ollama startet erst, wenn AutoDoku die KI braucht, nutzt nur so viele Kerne wie unter „Leistung“ eingestellt und entlädt das Modell nach 10 Minuten Pause.</small>` : ''}
+          </div>
+          <div class="prov-box" data-for="chrome"><button class="btn small" id="chrome-load" type="button">🖥️ Chrome-KI laden / prüfen</button></div>
           <label class="field prov-box" data-for="gemini auto"><span>Gemini-Schlüssel (gratis)</span>
             <div class="row"><input class="input" type="password" id="set-gkey" value="${esc(s.geminiKey || '')}" placeholder="AIza…" autocomplete="off"><button class="btn small" id="set-gtest" type="button">Testen</button></div>
             <small>Gratis auf <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> → „API-Schlüssel erstellen“ (Google-Konto, keine Kreditkarte). Hinweis: Im Gratis-Kontingent darf Google die Texte zur Verbesserung nutzen.</small>
           </label>
-          <label class="field prov-box" data-for="claude"><span>Claude-API-Schlüssel</span>
+          <label class="field prov-box" data-for="claude auto"><span>Claude-API-Schlüssel</span>
             <div class="row"><input class="input" type="password" id="set-key" value="${esc(s.apiKey)}" placeholder="sk-ant-…" autocomplete="off"><button class="btn small" id="set-test" type="button">Testen</button></div>
-            <small>Bekommst du auf <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> (braucht etwas Guthaben). Der Schlüssel bleibt nur auf diesem Gerät.</small>
+            <small>Bekommst du auf <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> → „Create Key“ (braucht etwas Guthaben). Achtung: Das ist <b>nicht</b> dasselbe wie dein Claude-Pro-Abo. Der Schlüssel bleibt nur auf diesem Gerät.</small>
           </label>
+          <div class="prov-box" data-for="openai">
+            <div class="grid2">
+              <label class="field"><span>Anbieter</span><select class="input" id="oa-preset">${Object.entries(AI.OA_PRESETS).map(([k, v]) => `<option value="${k}" ${(s.oaPreset || 'openai') === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select></label>
+              <label class="field"><span>Adresse (Base-URL)</span><input class="input" id="oa-base" value="${esc(s.oaBase || '')}" placeholder="https://…/v1"></label>
+            </div>
+            <label class="field"><span>API-Schlüssel</span><input class="input" type="password" id="oa-key" value="${esc(s.oaKey || '')}" placeholder="sk-… (bei LM Studio leer lassen)" autocomplete="off"><small id="oa-keyhint"></small></label>
+            <div class="grid2">
+              <label class="field"><span>Modell</span><div class="row"><input class="input" id="oa-model" value="${esc(s.oaModel || '')}" list="oa-models" placeholder="z. B. gpt-5-mini"><button class="btn small" id="oa-load" type="button" title="Modelle vom Anbieter laden">↻</button></div></label>
+              <label class="field"><span>Modell live (optional, billiger/schneller)</span><input class="input" id="oa-model-live" value="${esc(s.oaModelLive || '')}" list="oa-models" placeholder="leer = gleiches Modell"></label>
+            </div>
+            <datalist id="oa-models"></datalist>
+            <label class="check"><input type="checkbox" id="oa-vision" ${s.oaVision !== false ? 'checked' : ''}> Modell kann Bilder lesen (Tafelfotos)</label>
+            <button class="btn small" id="oa-test" type="button">Testen</button>
+          </div>
         </fieldset>
-        <fieldset class="prov-box" data-for="claude"><legend>Sparstufe (Claude)</legend>
+        <fieldset><legend>📏 Regeln – wie AutoDoku hört und notiert</legend>
+          <label class="field"><span>So soll notiert & zusammengefasst werden</span><textarea class="input" id="rule-notes" rows="3" placeholder="z. B. „Jede Definition als eigene Box“, „Beispiele immer vollständig durchrechnen“, „Code-Beispiele in Java“, „am Ende 5 Prüfungsfragen“">${esc(s.ruleNotes || '')}</textarea></label>
+          <label class="field"><span>Beim Hören beachten</span><textarea class="input" id="rule-listen" rows="2" placeholder="z. B. „Prof. Huber sagt ‚Strich‘ für Ableitung“, „‚Stack‘ ist immer die Datenstruktur“">${esc(s.ruleListen || '')}</textarea></label>
+          <label class="field"><span>Zusätzlich weglassen</span><input class="input" id="rule-ignore" value="${esc(s.ruleIgnore || '')}" placeholder="z. B. „Fußball-Gespräche“, „Wiederholungen der letzten Stunde“"></label>
+          <label class="check"><input type="checkbox" id="rule-jokes" ${s.ignoreJokes !== false ? 'checked' : ''}> Witze, Abschweifungen, Ermahnungen & Organisatorisches weglassen (Eselsbrücken bleiben als Tipp)</label>
+          <label class="check"><input type="checkbox" id="rule-terms" ${s.termNotes ? 'checked' : ''}> Fachbegriffe als eigene Notizen erklären – jede Notiz verlinkt sie mit [[Begriff]] (braucht den Notizordner)</label>
+          <label class="field"><span>Ordner für die Begriffe</span><input class="input" id="rule-termfolder" value="${esc(s.termFolder || 'Begriffe')}" style="max-width:260px"></label>
+          <p class="muted small">Pro Fach gibt's eigene Regeln & Fachbegriffe unter „Fächer“.</p>
+        </fieldset>
+        <fieldset class="prov-box" data-for="claude auto"><legend>Sparstufe (Claude)</legend>
           <div class="modes">${Object.entries(Store.MODES).map(([k, m]) => `<label class="mode ${s.mode === k ? 'on' : ''}"><input type="radio" name="mode" value="${k}" ${s.mode === k ? 'checked' : ''}><b>${m.label}</b><small>${m.hint}</small></label>`).join('')}</div>
           <details class="adv" ${s.mode === 'custom' ? 'open' : ''}><summary>Genauer einstellen</summary>
             <label class="check"><input type="checkbox" id="set-liveupd" ${s.liveUpdates ? 'checked' : ''}> Während der Stunde live zusammenfassen</label>
@@ -1333,8 +1726,46 @@
             <label class="field"><span>Update alle <b id="iv-val">${s.interval}</b> s</span><input type="range" id="set-interval" min="30" max="240" step="15" value="${s.interval}"></label>
             <label class="field"><span>…wenn mind. <b id="mw-val">${s.minWords}</b> neue Wörter</span><input type="range" id="set-minwords" min="15" max="200" step="5" value="${s.minWords}"></label>
           </div>
+          <label class="field"><span>Spracherkennung</span><select class="input" id="set-speech">${[
+            ['auto', 'Automatisch (lokal wenn eingerichtet, sonst Groq, sonst Gemini)'],
+            ...(Whisper.isDesktop() ? [['local', '🖥️ Lokal: Whisper large-v3-turbo (whisper.cpp) – genau, offline, schont den PC']] : []),
+            ['groq', '⚡ Whisper large-v3 über Groq (Cloud, gratis Schlüssel, sehr genau)'],
+            ['gemini', 'Gemini-Audio (gratis Schlüssel, genau, schont den Laptop)'],
+            ['google', 'Google/Chrome live (nur im Chrome-Browser, braucht offenes Internet)'],
+            ['whisper', 'Alte Browser-Erkennung (whisper base – langsam, laut, ungenau)'],
+          ].map(([k, l]) => `<option value="${k}" ${(s.speechEngine || 'auto') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          ${Whisper.isDesktop() ? `<div class="field"><span>🖥️ Lokale Spracherkennung (whisper.cpp, large-v3-turbo)</span>
+            <p class="spend" id="loc-status">… prüfe</p>
+            <div class="row wrap">
+              <select class="input" id="set-lpower" style="max-width:300px">${[['leise', 'Leise – 2 Kerne (Lüfter bleibt ruhig)'], ['normal', 'Ausgewogen – 4 Kerne (empfohlen)'], ['schnell', 'Schnell – 8 Kerne (lauter)']].map(([k, l]) => `<option value="${k}" ${(s.localPower || 'normal') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+              <button class="btn small" id="loc-install" type="button" style="display:none">⬇ Einrichten (ca. 560 MB, einmalig)</button>
+            </div>
+            <div class="quiz-progress" id="loc-bar" style="display:none;margin-top:8px"><span style="width:0%"></span></div>
+            <small>Läuft komplett auf deinem PC, ohne Internet. Startet erst beim Aufnehmen, nutzt nur wenige Kerne mit niedriger Priorität und beendet sich nach 10 Minuten Pause (gibt den Arbeitsspeicher frei). Die Leistungs-Stufe gilt auch für Ollama.</small>
+          </div>` : ''}
+          <label class="field"><span>Groq-Schlüssel für die Spracherkennung (gratis, optional)</span>
+            <div class="row"><input class="input" type="password" id="set-groq" value="${esc(s.groqKey || '')}" placeholder="gsk_…" autocomplete="off"><button class="btn small" id="set-groqtest" type="button">Testen</button></div>
+            <small>Gratis auf <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> (Google-Login, keine Kreditkarte). Reicht für ca. 8 Stunden Unterricht pro Tag. Claude selbst kann leider kein Audio hören – darum übernimmt das Whisper.</small>
+          </label>
+          <label class="field"><span>Mikrofon</span><select class="input" id="set-mic"><option value="">Standard-Mikrofon von Windows</option>${s.micId ? `<option value="${esc(s.micId)}" selected>${esc(s.micLabel || 'Gewähltes Mikrofon')}</option>` : ''}</select><small>Gilt für Groq-, Gemini- und Offline-Erkennung. Ein Headset- oder USB-Mikrofon nah beim Lehrer bringt am meisten.</small></label>
+          <div class="grid2">
+            <label class="field"><span>Sprache</span><select class="input" id="set-slang">
+              <option value="fach" ${s.speechLang !== 'auto' ? 'selected' : ''}>Sprache des Fachs (empfohlen – Deutsch schreibt englische Fachbegriffe mit)</option>
+              <option value="auto" ${s.speechLang === 'auto' ? 'selected' : ''}>Automatisch Deutsch/Englisch erkennen (experimentell)</option></select></label>
+            <label class="field"><span>Offline-Erkennung (Whisper)</span><select class="input" id="set-wmodel">
+              <option value="base" ${s.whisperModel !== 'small' ? 'selected' : ''}>Schnell (base, ~80 MB)</option>
+              <option value="small" ${s.whisperModel === 'small' ? 'selected' : ''}>Genauer bei Fachbegriffen (small, ~250 MB)</option></select></label>
+          </div>
+          <label class="field"><span>Eigene Fachbegriffe (für alle Fächer)</span><input class="input" id="set-gloss" value="${esc(s.glossary || '')}" placeholder="z. B. Prof. Huber, Spring Boot, Mathcad, Packet Tracer"><small>Die KI korrigiert falsch verstandene Wörter damit. Pro Fach: ⚙️ → Fächer.</small></label>
           <label class="check"><input type="checkbox" id="set-awake" ${s.keepAwake ? 'checked' : ''}> Bildschirm während der Aufnahme anlassen (am Handy wichtig – sonst stoppt die Erkennung)</label>
         </fieldset>
+        ${window.vaultAPI ? `<fieldset><legend>🗂️ Notizordner (wie Obsidian)</legend>
+          <p class="spend" id="vault-path">${Vault.V.root ? `📁 <b>${esc(Vault.V.root)}</b>` : 'Noch kein Ordner gewählt.'}</p>
+          <div class="row wrap"><button class="btn small" id="set-vault" type="button">Ordner wählen …</button>${Vault.V.root ? '<a class="btn small ghost" href="#/notes" id="set-vault-open">Öffnen</a>' : ''}</div>
+          <label class="check"><input type="checkbox" id="set-vsync" ${s.vaultSync ? 'checked' : ''}> Jede Stunde automatisch als Notiz (.md) speichern – Ordner pro Fach, Fotos in „Anhänge“</label>
+          <label class="check"><input type="checkbox" id="set-vtrans" ${s.vaultTranscript ? 'checked' : ''}> Transkript zusätzlich in „Transkripte“ ablegen</label>
+          <label class="check"><input type="checkbox" id="set-vconv" ${s.autoConvert ? 'checked' : ''}> Neue PDFs, Fotos, Videos & Word-Dateien automatisch in Notizen umwandeln</label>
+        </fieldset>` : ''}
         <fieldset><legend>Word-Dokument</legend>
           <div class="grid2">
             <label class="field"><span>Dein Name</span><input class="input" id="set-name" value="${esc(s.studentName)}" placeholder="optional"></label>
@@ -1347,6 +1778,26 @@
           <div class="subj-list">${subs.map(x => `<button class="subj-row" data-edit-sub="${esc(x.id)}" style="--c:${esc(x.color)}"><span>${esc(x.emoji)}</span><b>${esc(x.name)}</b><small>${esc(x.speechLang)}</small></button>`).join('')}
           <button class="subj-row add" data-edit-sub="">+ Fach hinzufügen</button></div>
         </fieldset>
+        ${window.desktopAPI ? `<fieldset><legend>🖥️ Mini-Fenster & Tastenkürzel</legend>
+          <p class="muted small" id="sc-list">…</p>
+          <div class="row wrap"><button class="btn small" id="set-mini" type="button">Mini-Fenster öffnen</button></div>
+          <p class="muted small">Das Mini-Fenster bleibt über anderen Programmen. Während einer Aufnahme ist immer ein roter Punkt sichtbar (Mini-Fenster bzw. Symbol unten rechts).</p>
+        </fieldset>
+        <fieldset><legend>📱 Handy als Tafel-Kamera & Mikrofon</legend>
+          <p class="muted small">Handy-Browser öffnen, QR-Code scannen – keine App nötig. Handy und Laptop müssen im selben WLAN sein (im Schul-WLAN klappt das oft nicht → Handy-Hotspot einschalten und den Laptop damit verbinden).</p>
+          <button class="btn small primary" id="set-phone" type="button">📱 Handy verbinden</button>
+        </fieldset>` : ''}
+        <fieldset><legend>🤝 Profil teilen (für Kollegen)</legend>
+          <p class="muted small">Exportiert Fächer, Fachbegriffe, Regeln und KI-Einstellungen. Kollegen importieren die Datei und tragen nur ihren eigenen Schlüssel ein.</p>
+          <label class="check"><input type="checkbox" id="prof-keys"> Meine Schlüssel mit exportieren (nur für eigene Geräte!)</label>
+          <div class="row wrap"><button class="btn small" id="prof-export" type="button">⬇ Profil exportieren</button><button class="btn small" id="prof-import" type="button">⬆ Profil importieren</button></div>
+        </fieldset>
+        ${Setup.isDesktop() ? `<fieldset><legend>ℹ️ Über AutoDoku</legend>
+          <p class="spend" id="upd-status">Version ${esc((window.AUTODOKU_INFO || {}).version || '')}</p>
+          <div class="row wrap"><button class="btn small" id="upd-check" type="button">Nach Updates suchen</button><button class="btn small primary" id="upd-install" type="button" style="display:none">⬆ Jetzt aktualisieren</button><button class="btn small" id="setup-open" type="button">🧰 Einrichtung prüfen</button></div>
+          <div class="quiz-progress" id="upd-bar" style="display:none;margin-top:8px"><span style="width:0%"></span></div>
+          <small>Notizen und Einstellungen bleiben bei Updates erhalten.</small>
+        </fieldset>` : ''}
         <fieldset><legend>Daten</legend>
           <p class="muted small">Alles bleibt lokal in diesem Browser. Audio wird nie gespeichert – nur Text. Die Spracherkennung von Chrome/Edge verarbeitet das Audio allerdings bei Google bzw. Microsoft; die Zusammenfassungen laufen über die Claude API.</p>
           <div class="row wrap"><button class="btn small" id="set-export" type="button">⬇ Sicherung exportieren</button><button class="btn small" id="set-import" type="button">⬆ Sicherung importieren</button><button class="btn small" id="set-demo" type="button">🎓 Demo-Stunde anlegen</button><button class="btn small danger" id="set-wipe" type="button">Alles löschen</button></div>
@@ -1358,14 +1809,25 @@
           Settings.set({
             apiKey: $('#set-key', el).value.trim(),
             provider: (el.querySelector('input[name=prov]:checked') || {}).value || 'auto',
+            groqKey: ($('#set-groq', el) || {}).value.trim(),
+            localPower: ($('#set-lpower', el) || {}).value || 'normal',
+            ...($('#set-omodel', el) && $('#set-omodel', el).value ? { ollamaModel: $('#set-omodel', el).value } : {}),
             geminiKey: $('#set-gkey', el).value.trim(),
             mode: (el.querySelector('input[name=mode]:checked') || {}).value || 'custom',
             liveUpdates: $('#set-liveupd', el).checked,
             modelLive: $('#set-mlive', el).value.trim() || 'claude-haiku-5-5',
             modelFinal: $('#set-mfinal', el).value.trim() || 'claude-haiku-5-5',
             interval: +$('#set-interval', el).value, minWords: +$('#set-minwords', el).value,
-            keepAwake: $('#set-awake', el).checked, studentName: $('#set-name', el).value.trim(), className: $('#set-class', el).value.trim(),
+            keepAwake: $('#set-awake', el).checked,
+            micId: ($('#set-mic', el) || {}).value || '', micLabel: (($('#set-mic', el) || {}).selectedOptions || [{}])[0].textContent || '',
+            speechEngine: $('#set-speech', el).value, studentName: $('#set-name', el).value.trim(), className: $('#set-class', el).value.trim(),
             suggestImages: $('#set-images', el).checked, appendTranscript: $('#set-transcript', el).checked,
+            speechLang: $('#set-slang', el).value, whisperModel: $('#set-wmodel', el).value, glossary: $('#set-gloss', el).value.trim(),
+            oaPreset: $('#oa-preset', el).value, oaBase: $('#oa-base', el).value.trim(), oaKey: $('#oa-key', el).value.trim(),
+            oaModel: $('#oa-model', el).value.trim(), oaModelLive: $('#oa-model-live', el).value.trim(), oaVision: $('#oa-vision', el).checked,
+            ruleNotes: $('#rule-notes', el).value.trim(), ruleListen: $('#rule-listen', el).value.trim(), ruleIgnore: $('#rule-ignore', el).value.trim(),
+            ignoreJokes: $('#rule-jokes', el).checked, termNotes: $('#rule-terms', el).checked, termFolder: $('#rule-termfolder', el).value.trim() || 'Begriffe',
+            ...(window.vaultAPI ? { vaultSync: $('#set-vsync', el).checked, vaultTranscript: $('#set-vtrans', el).checked, autoConvert: $('#set-vconv', el).checked } : {}),
           });
           toast('Gespeichert ✓');
           if (st.session) renderAll(st.session);
@@ -1381,9 +1843,125 @@
       $$('.prov-box', el).forEach(b => { b.style.display = b.dataset.for.split(' ').includes(p) ? '' : 'none'; });
       const cs = AI.chrome.state;
       const ctext = { available: '✅ Chrome-KI ist bereit (lokal, gratis).', downloadable: '⬇ Chrome-KI kann geladen werden – Button drücken (einmalig, braucht WLAN).', downloading: `⏳ Chrome-KI lädt … ${Math.round((AI.chrome.progress || 0) * 100)} %`, unavailable: '❌ Dein Laptop/Chrome kann die lokale KI nicht – nimm Gemini (gratis).', unsupported: '❌ Dieser Browser hat keine eingebaute KI (aktuelles Google Chrome am PC nötig) – nimm Gemini (gratis).', checking: '… prüfe Chrome-KI' }[cs] || cs;
-      $('#prov-status', el).textContent = (p === 'chrome' || p === 'auto') ? ctext : '';
+      $('#prov-status', el).textContent = p === 'chrome' ? ctext : '';
     };
-    $$('input[name=prov]', el).forEach(r => r.onchange = renderProv);
+    // Ollama
+    const renderOllama = () => {
+      const o = AI.ollama, ost = $('#ollama-status', el); if (!ost) return;
+      const rec = AI.recommendedModel();
+      const c = o.ctl || {};
+      if (o.pulling) ost.textContent = `⏳ Lade ${o.pulling.model} … ${Math.round((o.pulling.progress || 0) * 100)} %`;
+      else if (c.install && c.install.state === 'running') ost.textContent = `⏳ Richte Ollama ein … ${Math.round((c.install.progress || 0) * 100)} %`;
+      else if (o.state === 'running') ost.innerHTML = o.models.length ? `✅ Ollama läuft · Modell: <b>${esc(AI.ollamaModel())}</b>${c.loaded && c.loaded.length ? ' (im Speicher)' : ''}` : `✅ Ollama läuft – lade jetzt ein Modell (empfohlen für deinen PC: <b>${esc(rec)}</b>).`;
+      else if (o.state === 'stopped') ost.innerHTML = o.models.length ? `💤 Ollama ist installiert und startet automatisch, wenn die KI gebraucht wird · Modell: <b>${esc(AI.ollamaModel())}</b>` : '💤 Ollama ist installiert – lade ein Modell.';
+      else if (o.state === 'missing') ost.innerHTML = '⬇ Ollama ist noch nicht installiert. Ein Klick – AutoDoku lädt nur das Nötige (≈ 40 MB) und richtet es ohne Autostart ein.';
+      else if (o.state === 'checking') ost.textContent = '… suche Ollama';
+      else ost.innerHTML = '❌ Ollama nicht gefunden. In der Desktop-App installiert AutoDoku es selbst, im Browser: ollama.com.';
+      const sel = $('#set-omodel', el);
+      const cur = sel.value || Settings.get().ollamaModel || AI.ollamaModel();
+      const opts = [...new Set([...o.models, rec, 'qwen3:4b', 'qwen3:1.7b', 'gemma3:4b', 'qwen3:8b'])];
+      sel.innerHTML = opts.map(m => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(m)}${o.models.includes(m) ? ' ✓' : m === rec ? ' (empfohlen)' : ''}${/gemma3/.test(m) ? ' – liest Tafelfotos' : ''}</option>`).join('');
+      const usable = o.state === 'running' || o.state === 'stopped';
+      $('#ollama-pull', el).style.display = usable && !o.models.includes(sel.value) ? '' : 'none';
+      sel.style.display = usable ? '' : 'none';
+      $('#ollama-install', el).style.display = o.state === 'missing' ? '' : 'none';
+      $('#ollama-dl', el).style.display = o.state === 'offline' ? '' : 'none';
+      const na = $('#ollama-noauto', el); if (na) na.style.display = c.autostart ? '' : 'none';
+    };
+    if ($('#ollama-status', el)) {
+      AI.checkOllama().then(renderOllama);
+      $('#set-omodel', el).onchange = renderOllama;
+      $('#ollama-pull', el).onclick = async () => {
+        const m = $('#set-omodel', el).value;
+        const b = $('#ollama-pull', el); b.disabled = true;
+        const bar = $('#ollama-bar', el); bar.style.display = '';
+        try {
+          await AI.pullOllama(m, (pr) => { bar.firstElementChild.style.width = Math.round((pr.progress || 0) * 100) + '%'; renderOllama(); });
+          Settings.set({ ollamaModel: m });
+          toast(`✅ Modell ${esc(m)} bereit`, 'ok');
+        } catch (e) { toast('Modell laden: ' + esc(e.message), 'err', 8000); }
+        b.disabled = false; bar.style.display = 'none'; renderOllama();
+      };
+      $('#ollama-install', el).onclick = async () => {
+        const b = $('#ollama-install', el); b.disabled = true;
+        const bar = $('#ollama-bar', el); bar.style.display = '';
+        try {
+          await fetch('/ollamactl/install', { method: 'POST' });
+          for (;;) {
+            await new Promise(r => setTimeout(r, 800));
+            await AI.checkOllama(); renderOllama();
+            const ins = (AI.ollama.ctl || {}).install || {};
+            bar.firstElementChild.style.width = Math.round((ins.progress || 0) * 100) + '%';
+            if (ins.state === 'done') break;
+            if (ins.state === 'error') throw new Error(ins.error);
+          }
+          toast('✅ Ollama eingerichtet – jetzt noch ein Modell laden', 'ok');
+        } catch (e) { toast('Ollama einrichten: ' + esc(e.message), 'err', 9000); }
+        b.disabled = false; bar.style.display = 'none'; renderOllama();
+      };
+      const oq = $('#ollama-quit', el);
+      if (oq) {
+        fetch('/sys/ollama-quit').then(r => r.json()).then(j => { oq.checked = j.on; }).catch(() => {});
+        oq.onchange = () => fetch('/sys/ollama-quit?on=' + (oq.checked ? '1' : '0'));
+        $('#ollama-noauto', el).onclick = async () => { await fetch('/ollamactl/autostart?off=1', { method: 'POST' }); toast('Ollama startet nicht mehr mit Windows – AutoDoku startet es bei Bedarf.', 'ok'); await AI.checkOllama(); renderOllama(); };
+      }
+    }
+    // Updates
+    if ($('#upd-check', el)) {
+      const us = $('#upd-status', el);
+      const showUpd = (u) => {
+        if (!u) { us.textContent = `Version ${(window.AUTODOKU_INFO || {}).version || ''} · Update-Prüfung gerade nicht möglich (Internet?)`; return; }
+        us.innerHTML = u.newer ? `⬆ Neue Version <b>${esc(u.latest)}</b> verfügbar (du hast ${esc(u.current)}).` : `✅ Version ${esc(u.current)} – du bist aktuell.`;
+        $('#upd-install', el).style.display = u.newer ? '' : 'none';
+      };
+      Setup.checkUpdate(false).then(showUpd);
+      $('#upd-check', el).onclick = async () => { us.textContent = '… prüfe'; showUpd(await Setup.checkUpdate(true)); };
+      $('#upd-install', el).onclick = async () => {
+        const bar = $('#upd-bar', el); bar.style.display = '';
+        try {
+          await Setup.installUpdate((st) => { bar.firstElementChild.style.width = Math.round((st.progress || 0) * 100) + '%'; us.textContent = st.state === 'starting' ? 'Starte Installation – AutoDoku startet gleich neu …' : `⏳ Lade Update … ${Math.round((st.progress || 0) * 100)} %`; });
+        } catch (e) { toast('Update: ' + esc(e.message), 'err', 8000); bar.style.display = 'none'; }
+      };
+      $('#setup-open', el).onclick = () => { m.close && m.close(); openSetup(); };
+    }
+    // Lokale Spracherkennung (whisper.cpp)
+    const renderLocal = () => {
+      const ls = $('#loc-status', el); if (!ls) return;
+      const L0 = Whisper.localState;
+      const ins = L0.install || {};
+      if (ins.state === 'running') ls.textContent = `⏳ Lade herunter … ${Math.round((ins.progress || 0) * 100)} %`;
+      else if (L0.installed) ls.innerHTML = `✅ Eingerichtet: <b>${esc(L0.model.replace(/^ggml-|\.bin$/g, ''))}</b> · ${L0.running ? 'läuft gerade' : 'startet beim Aufnehmen'}`;
+      else ls.innerHTML = ins.state === 'error' ? `❌ Einrichten fehlgeschlagen: ${esc(ins.error || '')}` : 'Noch nicht eingerichtet.';
+      $('#loc-install', el).style.display = L0.installed || ins.state === 'running' ? 'none' : '';
+    };
+    if ($('#loc-status', el)) {
+      Whisper.checkLocal().then(renderLocal);
+      $('#loc-install', el).onclick = async () => {
+        const b = $('#loc-install', el); b.disabled = true;
+        const bar = $('#loc-bar', el); bar.style.display = '';
+        try {
+          await Whisper.installLocal((ins) => { bar.firstElementChild.style.width = Math.round((ins.progress || 0) * 100) + '%'; renderLocal(); });
+          toast('✅ Lokale Spracherkennung bereit', 'ok');
+          $('#set-speech', el).value = 'auto';
+        } catch (e) { toast('Einrichten: ' + esc(e.message), 'err', 9000); }
+        b.disabled = false; bar.style.display = 'none'; renderLocal();
+      };
+    }
+    // Groq-Schlüssel testen (kurzer stiller Ton reicht)
+    $('#set-groqtest', el).onclick = async () => {
+      const b = $('#set-groqtest', el); b.disabled = true; b.textContent = '…';
+      const key = $('#set-groq', el).value.trim();
+      const old = Settings.get().groqKey;
+      try {
+        Settings.set({ groqKey: key });
+        const tone = new Float32Array(16000 * 2); for (let i = 0; i < tone.length; i++) tone[i] = Math.sin(i / 8) * 0.02;
+        await Whisper.groqRun(tone, 'de', {});
+        b.textContent = '✓ läuft'; b.classList.add('ok');
+        toast('✓ Groq-Spracherkennung bereit', 'ok');
+      } catch (e) { Settings.set({ groqKey: old }); b.textContent = 'Fehler'; toast(esc(e.message), 'err', 7000); }
+      b.disabled = false;
+    };
+    $$('input[name=prov]', el).forEach(r => r.onchange = () => { renderProv(); if (provNow() === 'ollama') AI.checkOllama().then(renderOllama); });
     AI.onChange = () => { if (el.isConnected) renderProv(); };
     AI.checkChrome().then(renderProv);
     renderProv();
@@ -1422,6 +2000,16 @@
       const b = $('#spend-reset', el); if (b) b.onclick = () => { Store.Spend.reset(); renderSpend(); };
     };
     renderSpend();
+    // verfügbare Mikrofone eintragen (Namen gibt's erst nach einer Mikrofon-Freigabe)
+    (async () => {
+      const sel = $('#set-mic', el); if (!sel || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+      try {
+        const mics = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput' && d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+        const cur = Settings.get().micId || '';
+        sel.innerHTML = '<option value="">Standard-Mikrofon von Windows</option>' + mics.map((d, i) => `<option value="${esc(d.deviceId)}" ${d.deviceId === cur ? 'selected' : ''}>${esc(d.label || 'Mikrofon ' + (i + 1))}</option>`).join('') +
+          (cur && !mics.some(d => d.deviceId === cur) ? `<option value="${esc(cur)}" selected>${esc(Settings.get().micLabel || 'Gewähltes Mikrofon')} (nicht angesteckt)</option>` : '');
+      } catch (e) { /* egal */ }
+    })();
     $('#set-interval', el).oninput = (e) => { $('#iv-val', el).textContent = e.target.value; };
     $('#set-minwords', el).oninput = (e) => { $('#mw-val', el).textContent = e.target.value; };
     ['#set-interval', '#set-minwords'].forEach(id => $(id, el).addEventListener('change', markCustom));
@@ -1433,6 +2021,66 @@
       } catch (e) { b.textContent = 'Fehler'; toast(esc(e.message), 'err', 7000); }
       b.disabled = false;
     };
+    // Eigene API
+    const oaHint = () => { const pr = AI.OA_PRESETS[$('#oa-preset', el).value] || {}; $('#oa-keyhint', el).innerHTML = pr.key ? `Schlüssel bekommst du auf <a href="https://${pr.key}" target="_blank" rel="noopener">${pr.key}</a>.` : ''; };
+    $('#oa-preset', el).onchange = () => {
+      const pr = AI.OA_PRESETS[$('#oa-preset', el).value] || {};
+      if (pr.base != null) $('#oa-base', el).value = pr.base;
+      if (pr.model) $('#oa-model', el).value = pr.model;
+      oaHint();
+    };
+    if (!$('#oa-base', el).value) $('#oa-preset', el).onchange(); else oaHint();
+    $('#oa-load', el).onclick = async () => {
+      try {
+        const list = await AI.listOpenAIModels($('#oa-base', el).value.trim(), $('#oa-key', el).value.trim());
+        $('#oa-models', el).innerHTML = list.map(m => `<option value="${esc(m)}">`).join('');
+        toast(`${list.length} Modelle gefunden – ins Feld klicken zum Auswählen`, 'ok');
+      } catch (e) { toast('Modelle laden: ' + esc(e.message), 'err', 7000); }
+    };
+    $('#oa-test', el).onclick = async () => {
+      const b = $('#oa-test', el); b.disabled = true; b.textContent = '…';
+      const old = Settings.get();
+      Settings.set({ provider: 'openai', oaBase: $('#oa-base', el).value.trim(), oaKey: $('#oa-key', el).value.trim(), oaModel: $('#oa-model', el).value.trim(), oaPreset: $('#oa-preset', el).value });
+      try { const r = await AI.call({ maxTokens: 20, messages: [{ role: 'user', content: 'Antworte nur mit: ok' }] }); b.textContent = '✓ ' + (r.text || '').trim().slice(0, 12); b.classList.add('ok'); }
+      catch (e) { b.textContent = 'Fehler'; toast(esc(e.message), 'err', 8000); Settings.set({ provider: old.provider }); }
+      b.disabled = false;
+    };
+    // Desktop & Handy
+    if (window.desktopAPI) {
+      desktopAPI.info().then(i => {
+        const nice = (a) => a.replace('CommandOrControl', 'Strg').replace(/\+/g, ' + ');
+        const lbl = { window: 'Fenster ein-/ausblenden', rec: 'Aufnahme starten/pausieren', note: 'Schnellnotiz', mini: 'Mini-Fenster' };
+        const scl = $('#sc-list', el);
+        if (scl) scl.innerHTML = Object.entries(i.shortcuts).map(([k, a]) => `<kbd>${esc(nice(a))}</kbd> ${lbl[k]}${i.shortcutStatus[k] === false ? ' <span class="warn-txt">(belegt)</span>' : ''}`).join('<br>');
+      });
+      $('#set-mini', el).onclick = () => desktopAPI.openMini(false);
+      $('#set-phone', el).onclick = () => { m.close(); window.DesktopBridge && DesktopBridge.connectPhone(); };
+    }
+    // Profil
+    $('#prof-export', el).onclick = () => {
+      const withKeys = $('#prof-keys', el).checked;
+      download(new Blob([JSON.stringify(Rules.exportProfile(withKeys), null, 2)], { type: 'application/json' }), `AutoDoku-Profil${withKeys ? '-MIT-SCHLUESSELN' : ''}.json`);
+    };
+    $('#prof-import', el).onclick = () => {
+      const inp = $('#import-input'); inp.value = '';
+      inp.onchange = async () => {
+        try {
+          const r = Rules.importProfile(JSON.parse(await inp.files[0].text()));
+          toast(`✓ Profil übernommen: ${r.subjects} Fächer, Regeln & KI-Einstellungen${r.keys ? ' (inkl. Schlüssel)' : ' – trag jetzt deinen eigenen Schlüssel ein'}`, 'ok', 7000);
+          m.close(); openSettings();
+        } catch (e) { toast('Import: ' + esc(e.message), 'err'); }
+      };
+      inp.click();
+    };
+    const vb = $('#set-vault', el);
+    if (vb) vb.onclick = async () => {
+      const r = await window.vaultAPI.choose();
+      if (!r) return;
+      await Vault.init(); Vault.renderSidebar();
+      $('#vault-path', el).innerHTML = `📁 <b>${esc(r.vault)}</b>`;
+      toast('🗂️ Notizordner: ' + esc(r.name), 'ok');
+    };
+    const vo = $('#set-vault-open', el); if (vo) vo.onclick = () => m.close();
     $$('[data-edit-sub]', el).forEach(b => b.onclick = () => { m.close(); editSubject(b.dataset.editSub ? Subjects.get(b.dataset.editSub) : null); });
     $('#set-export', el).onclick = async () => { const d = await Store.exportAll(); download(new Blob([JSON.stringify(d)], { type: 'application/json' }), `AutoDoku_Sicherung_${new Date().toISOString().slice(0, 10)}.json`); };
     $('#set-import', el).onclick = () => {
@@ -1469,7 +2117,8 @@
           <label class="field"><span>Gesprochene Sprache</span><select class="input" id="fs-lang">${langs.map(([k, l]) => `<option value="${k}" ${sub.speechLang === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
         </div>
         <label class="field"><span>Sprache der Mitschrift</span><input class="input" id="fs-notes" value="${esc(sub.notesLang || 'Deutsch')}"></label>
-        <label class="field"><span>Extra-Wünsche für Claude (optional)</span><textarea class="input" id="fs-hints" rows="3" placeholder="z. B. „Lehrer heißt Prof. Huber, sagt oft ‚merken‘ bei wichtigen Sachen“ oder „Vokabeln immer mit Lautschrift“">${esc(sub.hints || '')}</textarea></label>
+        <label class="field"><span>Fachbegriffe (damit die Spracherkennung sie richtig schreibt)</span><textarea class="input" id="fs-gloss" rows="2" placeholder="z. B. Subnetzmaske, VLAN, Packet Tracer, OSPF">${esc(sub.glossary || '')}</textarea></label>
+        <label class="field"><span>Regeln für dieses Fach (optional)</span><textarea class="input" id="fs-hints" rows="3" placeholder="z. B. „Lehrer heißt Prof. Huber, sagt oft ‚merken‘ bei wichtigen Sachen“ oder „Vokabeln immer mit Lautschrift“">${esc(sub.hints || '')}</textarea></label>
       </div>`,
       actions: [
         ...(isNew ? [] : [{ label: 'Löschen', danger: true, onClick: async () => { if (await confirmBox('Fach löschen?', 'Die Mitschriften bleiben erhalten.', 'Löschen', true)) { Subjects.remove(sub.id); route(); } } }]),
@@ -1481,7 +2130,7 @@
             Subjects.upsert(Object.assign({}, sub, {
               name, emoji: $('#fs-emoji', el).value.trim() || '📘', color: $('#fs-color', el).value,
               kind: $('#fs-kind', el).value, speechLang: $('#fs-lang', el).value, notesLang: $('#fs-notes', el).value.trim() || 'Deutsch',
-              hints: $('#fs-hints', el).value.trim(),
+              hints: $('#fs-hints', el).value.trim(), glossary: $('#fs-gloss', el).value.trim(),
             }));
             route();
           },
@@ -1502,20 +2151,76 @@
           <li><b>Tafel fotografieren</b><span>📷 – Formeln und Skizzen landen automatisch im Dokument.</span></li>
           <li><b>✨ Fertig → ⬇ Word</b><span>Polierte Mitschrift mit echten Word-Formeln, Bildern und Quiz-Fragen.</span></li>
         </ol>
-        <p class="fineprint">🆓 Standardmäßig <b>gratis</b>: AutoDoku nutzt die eingebaute KI von Chrome (läuft lokal auf deinem Laptop) oder Google Gemini mit kostenlosem Schlüssel. Einstellen unter ⚙️.</p>
-        <label class="field"><span>Optional: Gemini-Schlüssel (gratis, falls dein Laptop keine Chrome-KI hat)</span>
-          <input class="input" type="password" id="ob-key" placeholder="AIza…" autocomplete="off">
+        <h3 class="ob-h">Welche KI soll mitschreiben?</h3>
+        <div class="modes prov ob-prov">${[
+          ['claude', '🟠 Claude', 'Beste Mitschriften & Tafelfotos. Cloud, eigener API-Schlüssel, ein paar Cent pro Stunde. Laptop bleibt leise.'],
+          ...(Setup.isDesktop() ? [['ollama', '🦙 Ollama (lokal)', `Gratis & offline auf deinem PC. AutoDoku lädt alles selbst (Modell ${esc(AI.recommendedModel())}). ${((window.AUTODOKU_INFO || {}).ramGB || 8) >= 12 ? 'Passt zu deinem PC.' : 'Dein PC hat wenig RAM – geht, ist aber langsamer.'}`]] : []),
+          ['gemini', '🔷 Gemini', 'Gratis mit kostenlosem Google-Schlüssel. Cloud.'],
+        ].map(([k, l, h], i) => `<label class="mode ${i === 0 ? 'on' : ''}"><input type="radio" name="obprov" value="${k}" ${i === 0 ? 'checked' : ''}><b>${l}</b><small>${h}</small></label>`).join('')}</div>
+        <label class="field ob-for" data-for="claude"><span>Claude-API-Schlüssel</span>
+          <input class="input" type="password" id="ob-ckey" placeholder="sk-ant-…" autocomplete="off">
+          <small>Auf <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">console.anthropic.com</a> → „Create Key“ (etwas Guthaben aufladen – nicht dasselbe wie ein Claude-Pro-Abo). Geht auch später in ⚙️.</small>
+        </label>
+        <label class="field ob-for" data-for="gemini" style="display:none"><span>Gemini-Schlüssel (gratis)</span>
+          <input class="input" type="password" id="ob-gmkey" placeholder="AIza…" autocomplete="off">
           <small>Kostenlos auf <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.</small>
         </label>
+        <p class="fineprint ob-for" data-for="ollama" style="display:none">🦙 Nach „Los geht's“ richtet AutoDoku Ollama ein (≈ 40 MB, ohne Autostart) und lädt das KI-Modell. Ollama läuft nur, solange AutoDoku es braucht.</p>
+        ${Setup.isDesktop() ? '<p class="fineprint">🎙️ Die <b>Spracherkennung</b> (Whisper large-v3-turbo) läuft lokal auf deinem PC und wird automatisch eingerichtet (einmalig ≈ 550 MB, im Hintergrund).</p>' : `<label class="field"><span>Groq-Schlüssel für die Spracherkennung (gratis, optional)</span>
+          <input class="input" type="password" id="ob-gkey" placeholder="gsk_…" autocomplete="off">
+          <small>Kostenlos auf <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> – sehr genaue Whisper-Erkennung.</small>
+        </label>`}
         <p class="fineprint">💬 Kurz fair bleiben: Frag deine Lehrkraft, ob Mitschreiben per App ok ist. AutoDoku speichert kein Audio, nur Text – und alles bleibt auf deinem Gerät.</p>
       </div>`,
       actions: [
-        { label: '🎓 Erst Demo ansehen', onClick: (el) => { const k = $('#ob-key', el).value.trim(); if (k) Settings.set({ geminiKey: k }); createDemo(); } },
-        { label: 'Los geht\'s', primary: true, onClick: (el) => { const k = $('#ob-key', el).value.trim(); if (k) Settings.set({ geminiKey: k }); } },
+        { label: '🎓 Erst Demo ansehen', onClick: (el) => { obKeys(el); createDemo(); } },
+        { label: 'Los geht\'s', primary: true, onClick: (el) => { obKeys(el); } },
       ],
       onClose: () => localStorage.setItem('autodoku.onboarded', '1'),
     });
+    const obProv = () => (m.el.querySelector('input[name=obprov]:checked') || {}).value || 'claude';
+    $$('input[name=obprov]', m.el).forEach(r => r.onchange = () => {
+      $$('.ob-prov .mode', m.el).forEach(x => x.classList.toggle('on', x.querySelector('input').value === obProv()));
+      $$('.ob-for', m.el).forEach(x => { x.style.display = x.dataset.for === obProv() ? '' : 'none'; });
+    });
     return m;
+  }
+
+  // Einrichtung (Desktop): Spracherkennung + ggf. Ollama laden, Fortschritt anzeigen
+  function openSetup(autoStart) {
+    const set = Settings.get();
+    const wantOllama = AI.provider() === 'ollama' || set.provider === 'ollama';
+    const m = modal({
+      title: '🧰 Einrichtung', wide: false,
+      body: `<p class="muted small">AutoDoku lädt alles Nötige selbst. Du kannst das Fenster schließen – es läuft im Hintergrund weiter (Anzeige unten rechts).</p><div id="setup-list"></div>`,
+      actions: [{ label: 'Im Hintergrund weiter' }, { label: 'Jetzt einrichten / wiederholen', primary: true, onClick: () => { Setup.start({ ollama: wantOllama, model: set.ollamaModel || AI.recommendedModel() }); return false; } }],
+    });
+    const off = Setup.mount($('#setup-list', m.el));
+    const oc = m.close; m.close = () => { off(); oc(); };
+    if (!Setup.run.steps.length) {
+      Setup.run.steps = Setup.plan({ ollama: wantOllama, model: set.ollamaModel || AI.recommendedModel() });
+      Whisper.checkLocal().then(L => { const w = Setup.run.steps.find(x => x.id === 'whisper'); if (w && L.installed) w.state = 'skip'; });
+      AI.checkOllama().then(() => {
+        const o = Setup.run.steps.find(x => x.id === 'ollama'); if (o && AI.ollama.installed) o.state = 'skip';
+        const md = Setup.run.steps.find(x => x.id === 'model'); if (md && AI.ollama.models.includes(md.model)) md.state = 'skip';
+        Setup.mount($('#setup-list', m.el));
+      });
+    }
+    if (autoStart) Setup.start({ ollama: wantOllama, model: set.ollamaModel || AI.recommendedModel() });
+    return m;
+  }
+
+  function obKeys(el) {
+    const prov = (el.querySelector('input[name=obprov]:checked') || {}).value || 'claude';
+    const c = $('#ob-ckey', el).value.trim(), gm = $('#ob-gmkey', el).value.trim(), g = ($('#ob-gkey', el) || { value: '' }).value.trim();
+    const patch = { provider: prov };
+    if (c) patch.apiKey = c;
+    if (gm) patch.geminiKey = gm;
+    if (g) patch.groqKey = g;
+    if (prov === 'claude' && !c) patch.provider = 'auto';
+    if (prov === 'ollama') patch.ollamaModel = AI.recommendedModel();
+    Settings.set(patch);
+    if (Setup.isDesktop()) setTimeout(() => openSetup(true), 300);
   }
 
   async function createDemo() {
@@ -1607,15 +2312,47 @@ $$ax^2 + bx + c = 0, \\quad a, b, c \\in \\mathbb{R},\\ a \\neq 0$$
 > 3. Der Scheitel liegt genau auf der $x$-Achse.`;
 
   // ============ Start ============
+  window.UI = { toast, modal, prompt, confirmBox, lightbox };
   $('#btn-settings').onclick = openSettings;
+  if (window.Vault && Vault.available) {
+    document.body.classList.add('has-vault');
+    const tg = $('#btn-sidebar'); if (tg) tg.onclick = () => document.body.classList.toggle('sb-open');
+    const bp = $('#btn-phone'); if (bp) bp.onclick = () => window.DesktopBridge && DesktopBridge.connectPhone();
+    Vault.init().then(() => { Vault.renderSidebar(); if (location.hash.startsWith('#/notes')) route(); });
+  }
   window.addEventListener('hashchange', route);
   route();
   setTimeout(onboarding, 400);
+  // Umstieg auf Claude (einmalig): bessere Mitschriften -> "Beste Qualität" statt Sparmodus
+  if (!localStorage.getItem('autodoku.v32')) {
+    try { localStorage.setItem('autodoku.v32', '1'); } catch (e) { /* egal */ }
+    const set = Settings.get();
+    if (set.mode === 'spar') Settings.set(Object.assign({ mode: 'normal' }, (({ liveUpdates, modelLive, modelFinal, interval, minWords }) => ({ liveUpdates, modelLive, modelFinal, interval, minWords }))(Store.MODES.normal)));
+  }
+  // Beim Start (Desktop): fehlt etwas? -> im Hintergrund einrichten. Neue Version? -> Hinweis
+  setTimeout(async () => {
+    if (!localStorage.getItem('autodoku.onboarded')) return;
+    if (Setup.isDesktop()) {
+      const L = await Whisper.checkLocal();
+      await AI.checkOllama();
+      const set = Settings.get();
+      const needOllama = set.provider === 'ollama' && (!AI.ollama.installed || !AI.ollama.models.length);
+      if (!L.installed || needOllama) Setup.start({ ollama: needOllama, model: set.ollamaModel || AI.recommendedModel() });
+      const u = await Setup.checkUpdate(false);
+      if (u && u.newer) toast(`⬆ AutoDoku ${esc(u.latest)} ist da – ⚙️ → Über AutoDoku → „Jetzt aktualisieren“`, 'ok', 12000);
+    }
+    if (!AI.ready() && !localStorage.getItem('autodoku.aiHint')) {
+      try { localStorage.setItem('autodoku.aiHint', '1'); } catch (e) { /* egal */ }
+      toast('🧠 Wähle einmal deine KI: Claude (Schlüssel) oder Ollama (lokal, gratis).', 'warn', 10000);
+      openSettings();
+    }
+  }, 3000);
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
   // für Tests
-  window.AutoDoku = { st, createDemo, liveUpdate, finalize, applyLive, splitSections, parseTasks, exportWord };
+  window.AutoDoku = { st, createDemo, liveUpdate, finalize, applyLive, splitSections, parseTasks, exportWord,
+    startRecording, stopRecording, startLesson, openSetup, openSettings, addPhotos, newSession, save, saveNow, curRecMs, renderAll, appendSeg, toast, route, vaultOn, syncToVault };
 })();

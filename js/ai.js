@@ -3,7 +3,10 @@
  *   chrome : eingebaute Chrome-KI (Gemini Nano) – läuft lokal, gratis, ohne Schlüssel
  *   gemini : Google Gemini API – Gratis-Kontingent mit kostenlosem Schlüssel (aistudio.google.com)
  *   claude : Claude API mit eigenem Schlüssel (kostenpflichtig)
- *   auto   : Chrome-KI wenn verfügbar, sonst Gemini (Claude nur, wenn ausdrücklich gewählt)
+ *   openai : OpenAI-kompatible API (OpenAI, Groq, Mistral, OpenRouter …)
+ *   ollama : Ollama auf dem eigenen PC – gratis, offline. In der Desktop-App verwaltet AutoDoku Ollama selbst
+ *            (installieren, bei Bedarf starten, beim Beenden schließen)
+ *   auto   : Claude wenn ein Schlüssel da ist, sonst Gemini, sonst Ollama, sonst Chrome-KI
  * Gleiche Schnittstelle wie Claude.call / Claude.stream.
  */
 (function (root) {
@@ -230,6 +233,274 @@
     return { text, stop: finish === 'MAX_TOKENS' ? 'max_tokens' : 'end_turn' };
   }
 
+
+  // Desktop-App: Anfragen laufen über den lokalen Server (kein CORS-Problem)
+  const isLocalHost = location.protocol === 'http:' && /^(127\.0\.0\.1|localhost)$/.test(location.hostname);
+
+  // ---------- Ollama (lokale KI auf dem eigenen PC) ----------
+  const OBASE = isLocalHost ? location.origin + '/ollama' : 'http://127.0.0.1:11434';
+  const isDesk = () => isLocalHost && !!(root.AUTODOKU_INFO && root.AUTODOKU_INFO.desktop);
+  const cachedModels = () => { try { return JSON.parse(localStorage.getItem('autodoku.ollamaModels') || '[]'); } catch (e) { return []; } };
+  // state: checking | running | stopped (installiert, läuft gerade nicht) | missing (nicht installiert) | offline (Browser: nicht erreichbar)
+  const ollama = { state: 'checking', models: cachedModels(), pulling: null, installed: false, ctl: null };
+  const ramGB = () => (root.AUTODOKU_INFO && root.AUTODOKU_INFO.ramGB) || navigator.deviceMemory || 8;
+
+  async function checkOllama() {
+    if (isDesk()) {
+      // Desktop-App: fragt die Verwaltung (startet dabei nichts)
+      try {
+        const st = await (await fetch('/ollamactl/status', { cache: 'no-store' })).json();
+        ollama.ctl = st; ollama.installed = st.installed || st.running;
+        if (st.running) { ollama.models = st.models.map(m => m.name); ollama.state = 'running'; try { localStorage.setItem('autodoku.ollamaModels', JSON.stringify(ollama.models)); } catch (e) { /* egal */ } }
+        else { ollama.state = st.installed ? 'stopped' : 'missing'; ollama.models = cachedModels(); }
+      } catch (e) { ollama.state = 'offline'; }
+      api.onChange && api.onChange();
+      return ollama.state;
+    }
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 2500);
+      const res = await fetch(OBASE + '/api/tags', { signal: ctl.signal });
+      clearTimeout(t);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const b = await res.json();
+      ollama.models = (b.models || []).map(m => m.name);
+      ollama.state = 'running';
+    } catch (e) {
+      ollama.state = 'offline';
+      ollama.models = [];
+    }
+    api.onChange && api.onChange();
+    return ollama.state;
+  }
+
+  function recommendedModel() { return ramGB() >= 12 ? 'qwen3:4b' : 'qwen3:1.7b'; }
+
+  // Desktop: Ollama erst starten, wenn es gebraucht wird
+  async function ensureOllama() {
+    if (ollama.state === 'running') return true;
+    if (!isDesk()) { await checkOllama(); return ollama.state === 'running'; }
+    const r = await fetch('/ollamactl/start', { method: 'POST' });
+    if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Err(b.error || 'Ollama startet nicht.', 0, 'ollama_offline'); }
+    await checkOllama();
+    return ollama.state === 'running';
+  }
+  // Wie viele Kerne Ollama nutzen darf (gleiche Einstellung wie die lokale Spracherkennung)
+  function ollamaThreads() {
+    const n = (root.AUTODOKU_INFO && root.AUTODOKU_INFO.cpus) || navigator.hardwareConcurrency || 8;
+    const p = S().localPower || 'normal';
+    if (p === 'schnell') return 0; // Ollama entscheidet
+    return Math.max(2, Math.min(p === 'leise' ? 4 : 6, n - 2));
+  }
+
+  function ollamaModel() {
+    const want = S().ollamaModel;
+    if (want && ollama.models.includes(want)) return want;
+    const prefs = ['qwen3:4b', 'qwen3:8b', 'gemma3:4b', 'qwen3:1.7b', 'qwen2.5:3b', 'llama3.2:3b', 'gemma3:1b'];
+    for (const p of prefs) if (ollama.models.includes(p)) return p;
+    return ollama.models.find(m => !/embed/i.test(m)) || want || recommendedModel();
+  }
+  const ollamaVision = (m) => /gemma3(?!:1b)|llava|vl|vision|minicpm|moondream/i.test(m || '');
+
+  function shrinkChars(text, maxChars) {
+    if (text.length <= maxChars) return text;
+    const q = '"' + '"' + '"';
+    const a = text.indexOf(q), b = a >= 0 ? text.indexOf(q, a + 3) : -1;
+    if (a >= 0 && b > a) {
+      const inner = text.slice(a + 3, b);
+      const over = text.length - maxChars;
+      if (inner.length > over + 500) return text.slice(0, a + 3) + '…' + inner.slice(over + 1) + text.slice(b);
+    }
+    return text.slice(0, maxChars);
+  }
+
+  // Kontextfenster für Ollama: auf Rechnern mit viel RAM größer, damit lange Stunden reinpassen
+  function ollamaCtx(tier) {
+    const ram = ramGB();
+    if (tier === 'final') return ram >= 24 ? 32768 : ram >= 12 ? 16384 : 8192;
+    return 8192;
+  }
+  function ollamaPredict(o) { return Math.min(o.maxTokens || 2000, o.tier === 'final' ? (ramGB() >= 12 ? 6144 : 4096) : 2048); }
+
+  async function ollamaCall(o, onText, noThink) {
+    const model = ollamaModel();
+    const numCtx = ollamaCtx(o.tier);
+    const numPredict = ollamaPredict(o);
+    const maxChars = Math.floor((numCtx - numPredict) * 2.8) - (o.system || '').length;
+    const messages = [];
+    if (o.system) messages.push({ role: 'system', content: o.system });
+    o.messages.forEach((m, i) => {
+      const blocks = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : m.content;
+      let text = blocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
+      if (i === o.messages.length - 1) text = shrinkChars(text, Math.max(2000, maxChars));
+      const msg = { role: m.role === 'assistant' ? 'assistant' : 'user', content: text };
+      const imgs = blocks.filter(b => b.type === 'image' && /^image\//.test(b.source.media_type)).map(b => b.source.data);
+      if (imgs.length && ollamaVision(model)) msg.images = imgs;
+      messages.push(msg);
+    });
+    const body = { model, messages, stream: !!onText, keep_alive: '10m', options: { num_ctx: numCtx, num_predict: numPredict } };
+    const th = ollamaThreads(); if (th) body.options.num_thread = th;
+    if (o.temperature != null) body.options.temperature = o.temperature;
+    if (!noThink) body.think = false;
+    let res;
+    try {
+      res = await fetch(OBASE + '/api/chat', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: o.signal });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      ollama.state = 'offline'; api.onChange && api.onChange();
+      throw new Err(isDesk() ? 'Ollama läuft nicht – AutoDoku versucht es gleich nochmal.' : 'Ollama läuft nicht. Starte die Ollama-App (Startmenü → Ollama).', 0, 'ollama_offline');
+    }
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      const msg = b.error || ('Ollama-Fehler ' + res.status);
+      if (!noThink && /think/i.test(msg)) return ollamaCall(o, onText, true);
+      if (/not found|pull/i.test(msg)) throw new Err(`Modell „${model}“ fehlt – ⚙️ → „Modell laden“.`, 404, 'ollama_model');
+      throw new Err('Ollama: ' + msg, res.status);
+    }
+    const clean = (t) => t.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').replace(/^\s+/, '');
+    let raw = '', pin = 0, pout = 0;
+    if (!onText) {
+      const b = await res.json();
+      raw = (b.message && b.message.content) || '';
+      pin = b.prompt_eval_count || 0; pout = b.eval_count || 0;
+    } else {
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+          if (!line) continue;
+          let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+          if (ev.error) throw new Err('Ollama: ' + ev.error, 500);
+          if (ev.message && ev.message.content) { raw += ev.message.content; onText(clean(raw), ev.message.content); }
+          if (ev.done) { pin = ev.prompt_eval_count || 0; pout = ev.eval_count || 0; }
+        }
+      }
+    }
+    report(o, pin, pout);
+    return { text: clean(raw), stop: pout >= numPredict ? 'max_tokens' : 'end_turn' };
+  }
+
+  // Modell direkt aus der App herunterladen (mit Fortschritt)
+  async function pullOllama(model, onProgress) {
+    await ensureOllama();
+    const res = await fetch(OBASE + '/api/pull', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model, stream: true }) });
+    if (!res.ok) throw new Err('Download fehlgeschlagen (' + res.status + ')', res.status);
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    ollama.pulling = { model, progress: 0, status: 'starte' };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+        if (!line) continue;
+        let ev; try { ev = JSON.parse(line); } catch (e) { continue; }
+        if (ev.error) { ollama.pulling = null; throw new Err(ev.error, 500); }
+        ollama.pulling = { model, status: ev.status, progress: ev.total ? (ev.completed || 0) / ev.total : ollama.pulling.progress };
+        onProgress && onProgress(ollama.pulling);
+      }
+    }
+    ollama.pulling = null;
+    await checkOllama();
+    return true;
+  }
+
+
+  // ---------- Eigene API (OpenAI-kompatibel: OpenAI, Groq, Mistral, OpenRouter, DeepSeek, LM Studio …) ----------
+  const OA_PRESETS = {
+    openai: { label: 'OpenAI', base: 'https://api.openai.com/v1', model: 'gpt-5-mini', key: 'platform.openai.com/api-keys' },
+    groq: { label: 'Groq (Gratis-Kontingent, sehr schnell)', base: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile', key: 'console.groq.com/keys' },
+    mistral: { label: 'Mistral', base: 'https://api.mistral.ai/v1', model: 'mistral-small-latest', key: 'console.mistral.ai/api-keys' },
+    openrouter: { label: 'OpenRouter (viele Modelle)', base: 'https://openrouter.ai/api/v1', model: 'google/gemini-2.5-flash', key: 'openrouter.ai/keys' },
+    deepseek: { label: 'DeepSeek', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat', key: 'platform.deepseek.com/api_keys' },
+    lmstudio: { label: 'LM Studio (lokal)', base: 'http://127.0.0.1:1234/v1', model: '', key: '' },
+    custom: { label: 'Eigene Adresse', base: '', model: '', key: '' },
+  };
+  // In der Desktop-App gehen Anfragen über den lokalen Server (kein CORS-Problem)
+  function oaUrl(path) {
+    const base = (S().oaBase || '').replace(/\/+$/, '');
+    return base + path;
+  }
+  function oaFetch(url, init) {
+    if (isLocalHost && root.AUTODOKU_INFO && root.AUTODOKU_INFO.desktop) {
+      init = Object.assign({}, init, { headers: Object.assign({}, init.headers, { 'x-target-url': url }) });
+      return fetch(location.origin + '/aiproxy', init);
+    }
+    return fetch(url, init);
+  }
+  async function listOpenAIModels(base, key) {
+    const res = await oaFetch(base.replace(/\/+$/, '') + '/models', { method: 'GET', headers: key ? { authorization: 'Bearer ' + key } : {} });
+    const b = await res.json().catch(() => null);
+    if (!res.ok) throw new Err((b && b.error && (b.error.message || b.error)) || ('Fehler ' + res.status), res.status);
+    return ((b && b.data) || []).map(m => m.id).sort();
+  }
+  async function openaiCall(o, onText) {
+    const s = S();
+    if (!s.oaBase) throw new Err('Eigene API: Adresse fehlt (⚙️).', 0, 'no_key');
+    const model = (o.tier === 'live' && s.oaModelLive) || s.oaModel;
+    if (!model) throw new Err('Eigene API: Modellname fehlt (⚙️).', 0, 'no_key');
+    const messages = [];
+    if (o.system) messages.push({ role: 'system', content: o.system });
+    o.messages.forEach(m => {
+      if (typeof m.content === 'string') return messages.push({ role: m.role, content: m.content });
+      const parts = m.content.map(b => b.type === 'image'
+        ? (/^image\//.test(b.source.media_type) ? { type: 'image_url', image_url: { url: `data:${b.source.media_type};base64,${b.source.data}` } } : null)
+        : { type: 'text', text: b.text }).filter(Boolean);
+      messages.push({ role: m.role, content: s.oaVision === false ? parts.filter(x => x.type === 'text').map(x => x.text).join('\n') : parts });
+    });
+    const body = { model, messages, stream: !!onText, max_tokens: o.maxTokens || 4000 };
+    if (o.temperature != null) body.temperature = o.temperature;
+    let res;
+    try {
+      res = await oaFetch(oaUrl('/chat/completions'), { method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, s.oaKey ? { authorization: 'Bearer ' + s.oaKey } : {}), body: JSON.stringify(body), signal: o.signal });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      throw new Err('Eigene API nicht erreichbar (Adresse/Internet prüfen).', 0, 'network');
+    }
+    if (!res.ok) {
+      const b = await res.json().catch(() => null);
+      const m = (b && b.error && (b.error.message || b.error)) || '';
+      if (res.status === 401) throw new Err('Eigene API: Schlüssel ungültig (401).', 401);
+      if (res.status === 429) throw new Err('Eigene API: Limit erreicht (429) – gleich nochmal.', 429);
+      throw new Err('Eigene API: ' + (m || res.status), res.status);
+    }
+    const clean = (t) => t.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').replace(/^\s+/, '');
+    let raw = '', usage = null, finish = null;
+    if (!onText) {
+      const b = await res.json();
+      const c = (b.choices || [])[0] || {};
+      raw = (c.message && c.message.content) || ''; usage = b.usage; finish = c.finish_reason;
+    } else {
+      const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+          if (!line.startsWith('data:')) continue;
+          const d = line.slice(5).trim(); if (d === '[DONE]') continue;
+          let ev; try { ev = JSON.parse(d); } catch (e) { continue; }
+          const c = (ev.choices || [])[0];
+          const t = c && c.delta && c.delta.content;
+          if (t) { raw += t; onText(clean(raw), t); }
+          if (c && c.finish_reason) finish = c.finish_reason;
+          if (ev.usage) usage = ev.usage;
+        }
+      }
+    }
+    report(o, (usage && usage.prompt_tokens) || 0, (usage && usage.completion_tokens) || 0);
+    return { text: clean(raw), stop: finish === 'length' ? 'max_tokens' : 'end_turn' };
+  }
+
   // ---------- Router ----------
   function report(o, input, output) {
     if (typeof root.Claude.onUsage === 'function') {
@@ -239,51 +510,81 @@
 
   function provider() {
     const s = S();
-    const p = s.provider || 'auto';
+    let p = s.provider || 'auto';
     if (p !== 'auto') return p;
-    if (chrome.state === 'available' || chrome.state === 'downloadable' || chrome.state === 'downloading') return 'chrome';
+    if (s.apiKey) return 'claude';
     if (s.geminiKey) return 'gemini';
-    if (chrome.state === 'checking') return 'chrome';
+    if (s.oaBase && s.oaModel) return 'openai';
+    if ((ollama.state === 'running' || ollama.installed) && ollama.models.length) return 'ollama';
+    if (chrome.state === 'available' || chrome.state === 'downloadable' || chrome.state === 'downloading' || chrome.state === 'checking') return 'chrome';
     return 'none';
   }
 
   function ready() {
     const p = provider();
     if (p === 'chrome') return chrome.state === 'available' || chrome.state === 'checking';
+    if (p === 'ollama') return (ollama.state === 'running' || ollama.installed || ollama.state === 'checking') && ollama.models.length > 0;
     if (p === 'gemini') return !!S().geminiKey;
     if (p === 'claude') return !!S().apiKey;
+    if (p === 'openai') return !!(S().oaBase && S().oaModel);
     return false;
   }
 
   function label() {
     const p = provider();
-    return { chrome: '🖥️ Chrome-KI (lokal, gratis)', gemini: '🔷 Gemini (gratis)', claude: '🟠 Claude', none: 'keine KI' }[p];
+    return { ollama: '🦙 Ollama (lokal)', chrome: '🖥️ Chrome-KI (lokal, gratis)', gemini: '🔷 Gemini (gratis)', claude: '🟠 Claude', openai: '🔌 ' + ((OA_PRESETS[S().oaPreset] || {}).label || 'Eigene API'), none: 'keine KI' }[p];
   }
 
   function why() {
     const p = provider();
     if (p === 'chrome' && (chrome.state === 'downloadable' || chrome.state === 'downloading')) return 'Chrome-KI noch nicht geladen – ⚙️ → „Chrome-KI laden“ (einmalig).';
+    if (p === 'ollama' && ollama.state === 'missing') return 'Ollama ist noch nicht installiert – ⚙️ → KI → „Ollama einrichten“.';
+    if (p === 'ollama' && !ollama.models.length) return 'Ollama hat noch kein Modell – ⚙️ → „Modell laden“.';
+    if (p === 'ollama' && ollama.state === 'offline') return 'Ollama läuft nicht. Starte die Ollama-App (Startmenü → Ollama).';
     if (p === 'gemini' && !S().geminiKey) return 'Gemini-Schlüssel fehlt (gratis auf aistudio.google.com).';
     if (p === 'claude' && !S().apiKey) return 'Claude-API-Schlüssel fehlt.';
-    if (p === 'none') return 'Keine Gratis-KI verfügbar: in ⚙️ einen kostenlosen Gemini-Schlüssel eintragen.';
+    if (p === 'openai' && !(S().oaBase && S().oaModel)) return 'Eigene API: Adresse oder Modell fehlt (⚙️).';
+    if (p === 'none') return 'Keine KI aktiv: in ⚙️ deinen Claude-API-Schlüssel eintragen (oder einen Gratis-Gemini-Schlüssel).';
     return '';
   }
 
-  const supportsImages = () => provider() !== 'chrome';
-  const isFree = () => provider() !== 'claude';
-
-  async function call(o) {
+  // Wie viele Zeichen passen ungefähr in EINE Anfrage (Nachricht ohne System-Prompt)?
+  // Die App portioniert danach, statt dass Text stillschweigend abgeschnitten wird.
+  function budget(tier, systemLen) {
     const p = provider();
+    const sys = systemLen || 0;
+    if (p === 'chrome') return Math.max(2500, 15000 - sys); // Gemini Nano: ca. 6000 Tokens
+    if (p === 'ollama') {
+      const o = { tier, maxTokens: tier === 'final' ? 16000 : 3500 };
+      return Math.max(2500, Math.floor((ollamaCtx(tier) - ollamaPredict(o)) * 2.8) - sys);
+    }
+    if (p === 'openai') return oaLocal() ? Math.max(2500, 15000 - sys) : 90000; // lokal (LM Studio) wie Ollama, sonst ≈ 32k Tokens
+    return 400000; // Claude, Gemini: großes Kontextfenster
+  }
+  // Kleine Modelle (wenig Kontext/Ausgabe): beim Polieren lieber die Live-Mitschrift behalten
+  // LM Studio / eigene Adresse auf diesem PC = meist kleines Modell mit wenig Kontext
+  const oaLocal = () => S().oaPreset === 'lmstudio' || /\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(S().oaBase || '');
+  const smallModel = () => ['ollama', 'chrome'].includes(provider()) || (provider() === 'openai' && oaLocal());
+
+  const supportsImages = () => { const p = provider(); return p === 'ollama' ? ollamaVision(ollamaModel()) : p === 'openai' ? S().oaVision !== false : p !== 'chrome'; };
+  const isFree = () => !['claude', 'openai'].includes(provider());
+
+  async function call(o, opts) {
+    const p = (opts && opts.forceProvider) || provider();
     if (p === 'claude') return root.Claude.call(Object.assign({}, o, { apiKey: S().apiKey }));
+    if (p === 'ollama') { await ensureOllama(); return ollamaCall(o, null); }
     if (p === 'gemini') return geminiCall(o, null);
     if (p === 'chrome') return chromeCall(o, null);
+    if (p === 'openai') return openaiCall(o, null);
     throw new Err(why() || 'Keine KI eingerichtet.', 0, 'no_key');
   }
   async function stream(o) {
     const p = provider();
     if (p === 'claude') return root.Claude.stream(Object.assign({}, o, { apiKey: S().apiKey }));
+    if (p === 'ollama') { await ensureOllama(); return ollamaCall(o, o.onText || (() => {})); }
     if (p === 'gemini') return geminiCall(o, o.onText || (() => {}));
     if (p === 'chrome') return chromeCall(o, o.onText || (() => {}));
+    if (p === 'openai') return openaiCall(o, o.onText || (() => {}));
     throw new Err(why() || 'Keine KI eingerichtet.', 0, 'no_key');
   }
 
@@ -295,7 +596,9 @@
     return chrome.state;
   }
 
-  const api = { call, stream, ready, provider, label, why, supportsImages, isFree, checkChrome, prepareChrome, pickGeminiModels, chrome, onChange: null };
+  const api = { call, stream, ready, provider, label, why, supportsImages, isFree, budget, smallModel, checkChrome, prepareChrome, pickGeminiModels, chrome,
+    ollama, checkOllama, ensureOllama, pullOllama, ollamaModel, recommendedModel, OA_PRESETS, listOpenAIModels, onChange: null };
   root.AI = api;
   checkChrome();
+  checkOllama();
 })(window);

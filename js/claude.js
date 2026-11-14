@@ -142,8 +142,10 @@
     for (let i = 0; i < tries; i++) {
       try { return await fn(); } catch (e) {
         last = e;
-        if (!(e instanceof ClaudeError) || ![429, 500, 502, 503, 529].includes(e.status)) throw e;
-        await new Promise(r => setTimeout(r, 2500 * (i + 1)));
+        // auch kurze WLAN-Aussetzer (Schule!) und Ollama-Hänger nochmal versuchen
+        const retry = e instanceof ClaudeError && ([429, 500, 502, 503, 504, 529].includes(e.status) || e.type === 'network');
+        if (!retry) throw e;
+        await new Promise(r => setTimeout(r, (e.status === 429 ? 6000 : 2500) * (i + 1)));
       }
     }
     throw last;
