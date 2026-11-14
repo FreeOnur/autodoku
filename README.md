@@ -17,8 +17,6 @@
 &nbsp;
 <a href="https://freeonur.github.io/autodoku/"><img alt="Im Browser ausprobieren" src="https://img.shields.io/badge/%E2%96%B6%20Live--Demo-im%20Browser%20%C3%B6ffnen-0A110F?style=for-the-badge&labelColor=7CF3C3"></a>
 
-<br><br>
-
 <img src="docs/readme/mitschrift.webp" alt="AutoDoku: polierte Mitschrift mit Formeln, daneben das Live-Transkript" width="92%">
 
 </div>
@@ -42,7 +40,7 @@
 
 ## ✨ Was AutoDoku kann
 
-| | |
+| Funktion | Was sie macht |
 |---|---|
 | 🎙️ **Live-Transkript** | Fach antippen – AutoDoku hört zu, der Text erscheint nach jeder Sprechpause. |
 | ⚡ **Live-Mitschrift** | Alle 1–2 Minuten wird daraus eine saubere Mitschrift: Stichpunkte, Merke-, Definitions- und Formel-Boxen. |
@@ -110,15 +108,16 @@ AutoDoku zeigt bei jeder Stunde 💰 an, was sie gekostet hat. Der API-Schlüsse
 ## ⚙️ So funktioniert's
 
 ```mermaid
-flowchart LR
-    MIC["🎙️ Mikrofon<br/>oder Handy"] -->|Abschnitte in<br/>Sprechpausen| W["whisper.cpp<br/>large-v3-turbo<br/><i>lokal</i>"]
-    W -->|Transkript| A{"🧠 KI"}
-    A -->|lokal| O["🦙 Ollama"]
-    A -->|Cloud| C["🟠 Claude / 🔷 Gemini"]
-    O & C --> N["📝 Live-Mitschrift"]
+flowchart TD
+    MIC["🎙️ Mikrofon oder Handy"] -->|Abschnitte in Sprechpausen| W["whisper.cpp · large-v3-turbo<br/><i>läuft lokal</i>"]
     CAM["📷 Tafelfoto"] --> A
-    N -->|✨ Fertig| D["⬇️ Word mit<br/>echten Formeln"]
-    N --> V["🗂️ Notizordner<br/>(Markdown)"]
+    W -->|Transkript| A{"🧠 KI deiner Wahl"}
+    A -->|lokal| O["🦙 Ollama"]
+    A -->|Cloud| C["🟠 Claude · 🔷 Gemini"]
+    O --> N["📝 Live-Mitschrift"]
+    C --> N
+    N -->|✨ Fertig| D["⬇️ Word mit echten Formeln"]
+    N --> V["🗂️ Notizordner (Markdown)"]
 ```
 
 **Damit dein Laptop leise bleibt:**
