@@ -62,7 +62,7 @@
 
 ### Windows 10 / 11
 
-1. **[AutoDoku-Setup.exe herunterladen](https://github.com/FreeOnur/autodoku/releases/latest/download/AutoDoku-Setup.exe)** (ca. 110 MB) und öffnen.
+1. **[AutoDoku-Setup.exe herunterladen](https://github.com/FreeOnur/autodoku/releases/latest/download/AutoDoku-Setup.exe)** (ca. 130 MB) und öffnen.
 2. Beim ersten Start wählst du deine KI. Den Rest erledigt der **Einrichtungs-Assistent** im Hintergrund:
 
    | Was | Größe | Wann |
@@ -244,7 +244,7 @@ npm run web      # Browser-Version auf http://localhost:5317
 git tag v3.3.1 && git push origin main --tags
 ```
 
-GitHub Actions ([`release.yml`](.github/workflows/release.yml)) baut dann auf Windows `AutoDoku-Setup.exe` und hängt sie an ein neues Release. Die installierten Apps finden das Update von selbst.
+GitHub Actions ([`release.yml`](.github/workflows/release.yml)) baut dann auf Windows `AutoDoku-Setup.exe` und hängt sie an ein neues Release – mit den Notizen aus [`build/release-notes.md`](build/release-notes.md) (vorher anpassen). Die Release-Aktion lässt sich auch ohne Tag unter *Actions → Release → Run workflow* starten. Die installierten Apps finden das Update von selbst.
 
 <details>
 <summary><b>📁 Projektstruktur</b></summary>
